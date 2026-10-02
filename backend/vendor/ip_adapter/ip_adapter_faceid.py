@@ -11,6 +11,42 @@ from transformers import CLIPImageProcessor, CLIPVisionModelWithProjection
 from .attention_processor_faceid import LoRAAttnProcessor, LoRAIPAttnProcessor
 from .utils import is_torch2_available, get_generator
 
+
+def _block_id(name: str, prefix: str) -> int:
+    """从 attention processor 名字里取出 block 序号.
+
+    上游实现是 ``int(name[len("up_blocks.")])``,但完整名字形如
+    ``up_blocks.0.attentions.0.transformer_blocks.0.attn1.processor``,
+    切片结果是 ``"0.attentions.0...."``,int() 会抛 ValueError,
+    导致 set_ip_adapter 整个失败、attn processor 停留在默认
+    AttnProcessor2_0 —— 表现为 FaceID 完全不起作用(且不报错)。
+    这里只取第一段数字。
+    """
+    rest = name[len(prefix):]
+    return int(rest.split(".", 1)[0])
+
+
+def _clip_hidden_size(image_encoder) -> int:
+    """取 CLIP 视觉塔的 hidden size(不是 projection_dim).
+
+    FaceID Plus v2 的 ProjPlusModel 默认 clip_embeddings_dim=1280,
+    对应 CLIP-ViT-H-14 视觉塔宽度。transformers 4.37 的
+    CLIPVisionConfig 通过 attribute_map 把 hidden_size 映射进
+    vision_config,所以 config.hidden_size 直接可用(1280);
+    projection_dim(1024)是投影后的维度,不适用于这里。
+
+    保留多级回退只是防御不同 transformers 版本的配置布局差异。
+    """
+    cfg = image_encoder.config
+    for holder in (cfg, getattr(cfg, "vision_config", None)):
+        if holder is None:
+            continue
+        hs = getattr(holder, "hidden_size", None)
+        if isinstance(hs, int) and hs > 0:
+            return hs
+    # 最后的兜底:用 ProjPlusModel 的默认值(1280 = ViT-H/14)
+    return 1280
+
 USE_DAFAULT_ATTN = False # should be True for visualization_attnmap
 if is_torch2_available() and (not USE_DAFAULT_ATTN):
     from .attention_processor_faceid import (
@@ -149,10 +185,10 @@ class IPAdapterFaceID:
             if name.startswith("mid_block"):
                 hidden_size = unet.config.block_out_channels[-1]
             elif name.startswith("up_blocks"):
-                block_id = int(name[len("up_blocks.")])
+                block_id = _block_id(name, "up_blocks.")
                 hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
             elif name.startswith("down_blocks"):
-                block_id = int(name[len("down_blocks.")])
+                block_id = _block_id(name, "down_blocks.")
                 hidden_size = unet.config.block_out_channels[block_id]
             if cross_attention_dim is None:
                 attn_procs[name] = LoRAAttnProcessor(
@@ -278,7 +314,7 @@ class IPAdapterFaceIDPlus:
         image_proj_model = ProjPlusModel(
             cross_attention_dim=self.pipe.unet.config.cross_attention_dim,
             id_embeddings_dim=512,
-            clip_embeddings_dim=self.image_encoder.config.hidden_size,
+            clip_embeddings_dim=_clip_hidden_size(self.image_encoder),
             num_tokens=self.num_tokens,
         ).to(self.device, dtype=self.torch_dtype)
         return image_proj_model
@@ -291,10 +327,10 @@ class IPAdapterFaceIDPlus:
             if name.startswith("mid_block"):
                 hidden_size = unet.config.block_out_channels[-1]
             elif name.startswith("up_blocks"):
-                block_id = int(name[len("up_blocks.")])
+                block_id = _block_id(name, "up_blocks.")
                 hidden_size = list(reversed(unet.config.block_out_channels))[block_id]
             elif name.startswith("down_blocks"):
-                block_id = int(name[len("down_blocks.")])
+                block_id = _block_id(name, "down_blocks.")
                 hidden_size = unet.config.block_out_channels[block_id]
             if cross_attention_dim is None:
                 attn_procs[name] = LoRAAttnProcessor(

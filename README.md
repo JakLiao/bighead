@@ -44,13 +44,11 @@ npm run dev
 
 ## 显存预算(实测)
 
-RTX 5070 Ti,SDXL + FaceID,steps=20:
+RTX 5070 Ti,SDXL + FaceID + 胶片 LoRA,steps=20,固定 seed 实测:
 
-| 分辨率 | 耗时 | 峰值显存 | 身份相似度 |
+| 分辨率 | 峰值显存(LoRA 关) | 峰值显存(LoRA 开) | 身份相似度 |
 |---|---|---|---|
-| 512×768 | ~12s | 6.46 GB | 0.51 |
-| 640×960 | ~8s | 6.52 GB | 0.45 |
-| 768×1152 | ~8s | 6.61 GB | 0.42 |
+| 512×768 | 6.46 GB | 6.63 GB | 0.5025 → 0.5046 |
 
 均低于 8GB 预算。关闭 AI 时不加载任何模型,几乎不占显存。
 
@@ -75,16 +73,55 @@ $PY scripts\profile_vram.py "C:\path\to\portrait.jpg"
 
 # 端到端(需先起后端 + 前端,脚本只做客户端)
 $PY scripts\verify_e2e.py
+
+# 胶片 LoRA 生效验证(SDXL 路线,子进程隔离跑 on/off 对照)
+$PY scripts\verify_film_lora.py
+
+# 列出 Lora 目录并判定每个权重适配 SD1.5 还是 SDXL
+$PY scripts\check_sdxl_lora.py
 ```
 
 `verify_ai.py` 会用 InsightFace 提取原图与生成图的 512 维人脸向量,
 计算余弦相似度来量化"是否还是同一个人",而不是只看图能不能出。
 
+## 依赖:PEFT(项目内隔离安装)
+
+Stable Diffusion WebUI 的共享 venv 没有 PEFT,而 diffusers 0.34 加载 LoRA
+的 PEFT 后端是硬依赖。该 venv 不允许写入,因此把 PEFT 装到项目内 `.pylibs`,
+由 `backend/peft_compat.py` 在运行时注入 `sys.path` 并打兼容补丁
+(Transformers 4.37.2 缺 `EncoderDecoderCache`、Accelerate 0.21.0 缺
+`clear_device_cache`),不污染共享环境。
+
+重建方式(`.pylibs/` 不入库):
+
+```bash
+pip install --no-deps --target .pylibs peft==0.15.2
+```
+
+## 胶片风格 LoRA
+
+| backbone | 权重 | 关键维度 |
+|---|---|---|
+| SDXL | `FilmGrainRedmond-FilmGrain-FilmGrainAF.safetensors` | `attn2_to_k.lora_down = [32, 2048]` |
+| SD1.5 | `LEOSAM's FilmGirl ... VELVIA版本_3.0.safetensors` | `attn2_to_k.lora_down = [128, 768]` |
+
+Kohya key 里 `attn2_to_k.lora_down` 的第二维就是 `cross_attention_dim`,
+用它判定架构比文件名可靠(`scripts/check_sdxl_lora.py` 会读全部候选并分类)。
+SDXL 的胶片 LoRA 靠触发词 `Film Grain, FilmGrainAF` 激活,`generate_one`
+只在 `lora_active` 为真时把它追加进 prompt —— 权重没加载时这两个 token
+没有对应参数,留着只是噪声。
+
 ## 已知限制
 
 - 仅桌面浏览器(Chrome / Edge)
 - 仅支持本机摄像头(无 DSLR 远程控制)
-- VELVIA LoRA 未生效:webui 的 venv 缺 PEFT,风格实际来自提示词
+- **SD1.5 路线已停用**(`config.SD15_ENABLED = False`)。本机的
+  `ip-adapter-faceid-plusv2_sd15.bin` 与 `realisticVision V5.0` 底模组合后,
+  身份正确但高频细节被严重抹平。四组对照证明与本项目代码无关:
+  纯文本正常 / 替换 processor 但喂零 embeds 正常 / 恢复标准 processor 再喂
+  同一份 embeds 正常,唯独 `LoRAIPAttnProcessor2_0` 与 FaceID Plus v2 embeds
+  同时生效才崩;官方 `IPAdapterFaceIDPlus.generate()` 走原生默认参数同样崩。
+  属权重与底模不适配,要复活需换配套 FaceID 权重或换底模。
 - 人脸检测失败时降级为纯文本生成(不报错,identity 丢失)
 - 不引外部字体/贴纸素材包(代码现绘,可后续扩展)
 - 不打包成 exe(直接 dev server 运行)

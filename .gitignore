@@ -31,6 +31,14 @@ backend/vendor/clip_vision/
 venv/
 .cuda_cache/
 
+# 项目内隔离安装的第三方依赖(PEFT 等)
+# 共享的 webui venv 缺 PEFT 且不允许写入,因此装到项目内 .pylibs,
+# 由 backend/peft_compat.py 在运行时注入 sys.path。
+# 体积大且可由 pip --target 重建,不入库。
+.pylibs/
+.pipcache/
+.piptmp/
+
 # IDE
 .vscode/
 .idea/
