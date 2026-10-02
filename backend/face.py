@@ -34,10 +34,11 @@ class FaceResult:
     bbox: tuple[int, int, int, int] | None
     score: float
     no_face: bool
+    embedding: "np.ndarray | None" = None
 
 
 def extract_face(pil: Image.Image, target_size: int = 512) -> FaceResult:
-    """检测最大人脸,裁剪并对齐为正方形 PIL."""
+    """检测最大人脸,裁剪为正方形 PIL,并返回 512 维归一化人脸向量."""
     img = np.array(pil.convert("RGB"))
     app = _get_app()
     faces = app.get(img)
@@ -61,4 +62,14 @@ def extract_face(pil: Image.Image, target_size: int = 512) -> FaceResult:
 
     crop = img[y1:y2, x1:x2]
     face_pil = Image.fromarray(crop).resize((target_size, target_size), Image.LANCZOS)
-    return FaceResult(face_pil=face_pil, bbox=(x1, y1, x2, y2), score=float(face.det_score), no_face=False)
+    emb = getattr(face, "normed_embedding", None)
+    embedding = None
+    if emb is not None:
+        embedding = emb.reshape(1, -1).astype(np.float32)
+    return FaceResult(
+        face_pil=face_pil,
+        bbox=(x1, y1, x2, y2),
+        score=float(face.det_score),
+        no_face=False,
+        embedding=embedding,
+    )

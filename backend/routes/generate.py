@@ -25,13 +25,13 @@ async def generate_start(
         raise HTTPException(400, f"unknown style: {style}")
 
     job_dir = OUTPUT_DIR / job_id
-    photo_dir = job_dir / "photos"
-    if not photo_dir.exists():
+    # 与 capture.py 的落盘布局保持一致:outputs/{job_id}/photo_{i}.jpg
+    if not job_dir.exists():
         raise HTTPException(400, f"no captures for job {job_id}")
 
-    photo_paths = sorted(p for p in photo_dir.glob("photo_*.jpg"))
+    photo_paths = sorted(job_dir.glob("photo_*.jpg"))
     if not photo_paths:
-        raise HTTPException(400, "no photos")
+        raise HTTPException(400, f"no photos for job {job_id}")
 
     update(job_id, status="running", total=len(photo_paths), current=0)
     background.add_task(_run, job_id, photo_paths, style, steps)
@@ -39,13 +39,10 @@ async def generate_start(
 
 
 async def _run(job_id: str, photo_paths: list[Path], style: str, steps: int | None):
-    from PIL import Image
-
     style_cfg = STYLES[style]
     out_dir = OUTPUT_DIR / job_id / "ai"
     try:
-        # 把 photo 复制/链接到 outputs/{job}/photos 路径(已在 photo_dir)
-        await pipeline.generate_async(
+        result = await pipeline.generate_async(
             job_id=job_id,
             frame_paths=[str(p) for p in photo_paths],
             style_key=style,
@@ -53,7 +50,15 @@ async def _run(job_id: str, photo_paths: list[Path], style: str, steps: int | No
             out_dir=out_dir,
             steps=steps,
         )
-        update(job_id, status="done")
+        # 把产物与显存峰值写回任务状态,前端轮询 /api/jobs/{id} 才能拿到结果
+        update(
+            job_id,
+            status="done",
+            current=len(result.image_paths),
+            total=len(photo_paths),
+            images=[f"/outputs/{job_id}/ai/{Path(p).name}" for p in result.image_paths],
+            vram_peak_gb=round(result.vram_peak_gb, 2),
+        )
     except Exception as e:
         await ws.broadcast(job_id, {"status": "error", "msg": str(e)})
         update(job_id, status="error", msg=str(e))

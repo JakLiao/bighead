@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -49,7 +50,8 @@ def make_face_jpeg(idx: int, size=(640, 800)) -> bytes:
 
 
 def post_multipart(path: str, fields: dict[str, str],
-                   files: list[tuple[str, str, bytes]]) -> tuple[int, bytes]:
+                   files: list[tuple[str, str, bytes]],
+                   timeout: int = 120) -> tuple[int, bytes]:
     boundary = "----bhe2e" + uuid.uuid4().hex
     body = bytearray()
     for key, val in fields.items():
@@ -66,7 +68,7 @@ def post_multipart(path: str, fields: dict[str, str],
     req = urllib.request.Request(BASE + path, data=bytes(body), method="POST")
     req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, e.read()
@@ -165,6 +167,43 @@ def main() -> int:
     check("no internal dirs leaked",
           all(not i["job_id"].startswith(("_", ".")) for i in items),
           f"ids={[i['job_id'] for i in items][:5]}")
+
+    # 7) AI 生成全链路(走真实 HTTP + WS 进度)
+    if "--ai" in sys.argv:
+        print("\n[7] AI generation over HTTP (+WS progress)")
+        face = Path(sys.argv[sys.argv.index("--ai") + 1]) if len(sys.argv) > sys.argv.index("--ai") + 1 else None
+        if not face or not face.exists():
+            check("AI job", False, f"usage: --ai <face.jpg>, got {face}")
+        else:
+            st, body = post_multipart(
+                "/api/capture/save", {}, [("images", "real.jpg", face.read_bytes())]
+            )
+            jid = json.loads(body)["job_id"]
+            st, body = post_multipart(
+                "/api/generate/start", {"job_id": jid, "style": "FILM_VELVIA", "steps": "20"},
+                [], timeout=600,
+            )
+            ok = st == 200
+            check("POST /api/generate/start", ok, f"status={st} {body[:120]}")
+            if ok:
+                deadline = time.time() + 600
+                last = None
+                while time.time() < deadline:
+                    time.sleep(5)
+                    _, js = get_json(f"/api/jobs/{jid}")
+                    if isinstance(js, dict):
+                        if js.get("status") != last:
+                            print(f"    status={js.get('status')} "
+                                  f"{js.get('current')}/{js.get('total')} {js.get('msg','')[:40]}",
+                                  flush=True)
+                            last = js.get("status")
+                        if js.get("status") in ("done", "error"):
+                            check("AI job finished", js.get("status") == "done",
+                                  f"status={js.get('status')} msg={js.get('msg','')[:80]}")
+                            print(f"    vram_peak={js.get('vram_peak_gb')}GB images={js.get('images')}")
+                            break
+                else:
+                    check("AI job finished", False, "timeout after 600s")
 
     print("\n" + "=" * 64)
     print(f"  PASS: {len(PASS)}   FAIL: {len(FAIL)}")

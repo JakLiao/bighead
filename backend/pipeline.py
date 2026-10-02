@@ -191,6 +191,7 @@ class BigHeadPipeline:
         steps: int | None = None,
         faceid_scale: float | None = None,
         size: tuple[int, int] | None = None,
+        faceid_embeds=None,
     ):
         """生成单张图,返回 PIL.Image.
         自己组装 FaceID pipeline:InsightFace 抽 faceid_embeds → ip-adapter proj → concat 到 prompt embeds → pipe 出图.
@@ -213,7 +214,6 @@ class BigHeadPipeline:
 
         if faceid_scale is not None:
             self.ip_adapter.set_scale(faceid_scale)
-        scale = faceid_scale if faceid_scale is not None else FACEID_SCALE
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -222,17 +222,24 @@ class BigHeadPipeline:
         self._ensure_image_encoder_on_gpu()
 
         # 1. InsightFace 提取 faceid_embeds(512 维)
+        #    若调用方已算好(如 generate_async 里的 extract_face)则直接复用,避免重复检测
         import numpy as np
-        arr = np.array(face_pil.convert("RGB"))
-        faces = self.face_app.get(arr)
-        if not faces:
-            log.warning("no face detected, falling back to plain generation")
-            faceid_embeds = np.zeros((1, 512), dtype=np.float32)
-        else:
-            face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-            faceid_embeds = face.normed_embedding.reshape(1, -1).astype(np.float32)
         import torch as _torch
-        faceid_embeds_t = _torch.from_numpy(faceid_embeds)
+
+        if faceid_embeds is not None:
+            faceid_embeds_t = _torch.as_tensor(faceid_embeds, dtype=_torch.float32)
+            if faceid_embeds_t.dim() == 1:
+                faceid_embeds_t = faceid_embeds_t.unsqueeze(0)
+        else:
+            arr = np.array(face_pil.convert("RGB"))
+            faces = self.face_app.get(arr)
+            if not faces:
+                log.warning("no face detected, falling back to plain generation")
+                faceid_embeds = np.zeros((1, 512), dtype=np.float32)
+            else:
+                face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+                faceid_embeds = face.normed_embedding.reshape(1, -1).astype(np.float32)
+            faceid_embeds_t = _torch.from_numpy(faceid_embeds)
 
         # 2. 用 ip-adapter proj model 得到 image prompt embeds(PlusXL 路径)
         # CLIP Vision 编码器只在算 embeds 时用一次,之后整个去噪过程都不需要它。
@@ -323,6 +330,7 @@ class BigHeadPipeline:
 
         out_dir.mkdir(parents=True, exist_ok=True)
         out_paths: list[str] = []
+        failures: list[str] = []
         total = len(frame_paths)
         vram_peak = 0.0
 
@@ -330,10 +338,20 @@ class BigHeadPipeline:
             try:
                 await ws.broadcast(job_id, {"status": "running", "current": i, "total": total, "msg": f"生成第 {i+1}/{total} 张"})
                 pil = Image.open(fp)
+                pil.load()
                 fr = extract_face(pil)
-                face_pil = fr.face_pil if not fr.no_face else pil.resize((512, 512))
+                if fr.no_face:
+                    # 检不到脸时保持原比例缩放,不能拉伸成正方形(会严重变形)
+                    log.warning("[%s] no face in %s, using full image", job_id, Path(fp).name)
+                    face_pil = _fit_within(pil, 768)
+                    emb = None
+                else:
+                    face_pil = fr.face_pil
+                    emb = fr.embedding
 
-                img = self.generate_one(face_pil, style_cfg, backbone=backbone, steps=steps)
+                img = self.generate_one(
+                    face_pil, style_cfg, backbone=backbone, steps=steps, faceid_embeds=emb
+                )
                 out_path = out_dir / f"ai_{i+1}.jpg"
                 img.convert("RGB").save(out_path, quality=92)
                 out_paths.append(str(out_path))
@@ -343,7 +361,12 @@ class BigHeadPipeline:
                 log.info("[%s] generated %s, vram peak=%.2fGB", job_id, out_path.name, peak_gb)
             except Exception as e:
                 log.exception("generate failed for %s", fp)
+                failures.append(str(e))
                 await ws.broadcast(job_id, {"status": "error", "current": i, "total": total, "msg": f"第 {i+1} 张失败: {e}"})
+
+        # 全部失败时抛出,避免上游把空结果标成 done
+        if not out_paths and failures:
+            raise RuntimeError(f"全部 {total} 张生成失败: {failures[0]}")
 
         await ws.broadcast(job_id, {
             "status": "done",
@@ -359,6 +382,16 @@ def _clip_vision_path() -> Path:
     """CLIP-ViT-H 视觉编码器路径(SDXL FaceID 必需)."""
     from .config import CLIP_VISION_H
     return CLIP_VISION_H
+
+
+def _fit_within(pil, max_side: int):
+    """等比缩放到最长边不超过 max_side,保持原始宽高比."""
+    w, h = pil.size
+    longest = max(w, h)
+    if longest <= max_side:
+        return pil
+    scale = max_side / longest
+    return pil.resize((max(1, int(w * scale)), max(1, int(h * scale))))
 
 
 # 全局单例
