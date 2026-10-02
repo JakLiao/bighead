@@ -17,13 +17,13 @@ import torch
 
 from .config import (
     ACTIVE_BACKBONE,
-    FACEID_LORA_SD15,
     FACEID_LORA_SDXL,
     FACEID_SCALE,
     INSIGHTFACE_ROOT,
     IPADAPTER_FACEID_SD15,
     IPADAPTER_FACEID_SDXL,
     LORA_SCALE,
+    OUTPUT_DIR,
     PROJECT_ROOT,
     SD15_CKPT,
     SD15_ENABLED,
@@ -550,11 +550,18 @@ class BigHeadPipeline:
         if not out_paths and failures:
             raise RuntimeError(f"全部 {total} 张生成失败: {failures[0]}")
 
+        # 图片 URL 按实际落盘路径反推,不要在这里硬编码目录层级 ——
+        # out_dir 由调用方决定(目前是 outputs/{job_id}/ai/{style}/),
+        # 写死成 /outputs/{job_id}/ai_x.jpg 会在目录分段变化后静默给出 404。
+        urls = [
+            f"/{Path(p).relative_to(OUTPUT_DIR.parent).as_posix()}" for p in out_paths
+        ]
         await ws.broadcast(job_id, {
             "status": "done",
             "current": total,
             "total": total,
-            "images": [f"/outputs/{job_id}/ai_{i+1}.jpg" for i in range(len(out_paths))],
+            "style": style_key,
+            "images": urls,
             "vram_peak_gb": round(vram_peak, 2),
         })
         return GenerationOutput(image_paths=out_paths, vram_peak_gb=vram_peak)

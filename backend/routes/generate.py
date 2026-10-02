@@ -40,7 +40,10 @@ async def generate_start(
 
 async def _run(job_id: str, photo_paths: list[Path], style: str, steps: int | None):
     style_cfg = STYLES[style]
-    out_dir = OUTPUT_DIR / job_id / "ai"
+    # 产物按 job_id/style 分目录:换风格重跑时不能覆盖上一轮结果。
+    # 早期实现固定写 outputs/{job_id}/ai/,用户换个风格再点一次,
+    # 上一轮的图片就被覆盖了,而 job 状态里只剩最后一轮。
+    out_dir = OUTPUT_DIR / job_id / "ai" / style
     try:
         result = await pipeline.generate_async(
             job_id=job_id,
@@ -54,14 +57,15 @@ async def _run(job_id: str, photo_paths: list[Path], style: str, steps: int | No
         update(
             job_id,
             status="done",
+            style=style,
             current=len(result.image_paths),
             total=len(photo_paths),
-            images=[f"/outputs/{job_id}/ai/{Path(p).name}" for p in result.image_paths],
+            images=[f"/outputs/{job_id}/ai/{style}/{Path(p).name}" for p in result.image_paths],
             vram_peak_gb=round(result.vram_peak_gb, 2),
         )
     except Exception as e:
         await ws.broadcast(job_id, {"status": "error", "msg": str(e)})
-        update(job_id, status="error", msg=str(e))
+        update(job_id, status="error", style=style, msg=str(e))
 
 
 @router.get("/api/jobs/{job_id}")

@@ -77,6 +77,15 @@ $PY scripts\verify_e2e.py
 # 胶片 LoRA 生效验证(SDXL 路线,子进程隔离跑 on/off 对照)
 $PY scripts\verify_film_lora.py
 
+# 真实照片全流程(4 个风格各 4 张,含身份相似度与显存)
+$PY scripts\verify_flow_real.py
+
+# 风格差异量化(两两色相直方图 TV 距离)
+$PY scripts\verify_style_diff.py
+
+# 对运行中的后端做真实 HTTP 冒烟
+$PY scripts\verify_live.py
+
 # 列出 Lora 目录并判定每个权重适配 SD1.5 还是 SDXL
 $PY scripts\check_sdxl_lora.py
 ```
@@ -110,6 +119,18 @@ Kohya key 里 `attn2_to_k.lora_down` 的第二维就是 `cross_attention_dim`,
 SDXL 的胶片 LoRA 靠触发词 `Film Grain, FilmGrainAF` 激活,`generate_one`
 只在 `lora_active` 为真时把它追加进 prompt —— 权重没加载时这两个 token
 没有对应参数,留着只是噪声。
+
+### 产物目录
+
+```
+outputs/{job_id}/
+  photo_{i}.jpg              连拍原图
+  ai/{style}/ai_{i}.jpg      AI 产出,按风格分目录
+```
+
+AI 产物按 `job_id/style` 分目录,换风格重跑不会覆盖上一轮结果。
+`/api/jobs/{id}` 返回的 `images` 只包含最近一次生成的风格,同时回传
+`style` 字段供前端区分;要取历史结果直接按目录路径取。
 
 ## 已知限制
 

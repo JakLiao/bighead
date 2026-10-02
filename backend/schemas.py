@@ -54,3 +54,7 @@ class JobInfo(BaseModel):
     images: list[str] = Field(default_factory=list)
     layout_url: str | None = None
     vram_peak_gb: float = 0.0
+    # 当前 images 属于哪个风格。换风格重跑会覆盖 job 状态里的 images,
+    # 前端据此提示"这是新一版",而不是把上一版悄悄换掉。
+    # 产物本身按 outputs/{job_id}/ai/{style}/ 分目录存放,互不覆盖。
+    style: str | None = None
