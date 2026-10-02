@@ -79,7 +79,8 @@ export function HomePage() {
       </div>
 
       <div className="relative">
-        <LiveCamera onCapture={() => {}} active={!capturing || showCountdown} />
+        {/* 摄像头全程保持挂载:连拍期间反复开关会触发 getUserMedia 竞态与设备抢占 */}
+        <LiveCamera onCapture={() => {}} active={true} />
         <CountdownOverlay show={showCountdown} onComplete={doSnap} />
         <ShutterFlash show={flash} />
       </div>
