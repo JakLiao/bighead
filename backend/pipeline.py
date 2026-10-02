@@ -1,6 +1,7 @@
 """SDXL + IP-Adapter FaceID + VELVIA LoRA 推理(单例懒加载)."""
 from __future__ import annotations
 
+import gc
 import logging
 import os
 import sys
@@ -217,6 +218,9 @@ class BigHeadPipeline:
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
+        # 上一轮生成可能把 CLIP Vision 卸到了 CPU,这里搬回来
+        self._ensure_image_encoder_on_gpu()
+
         # 1. InsightFace 提取 faceid_embeds(512 维)
         import numpy as np
         arr = np.array(face_pil.convert("RGB"))
@@ -231,6 +235,9 @@ class BigHeadPipeline:
         faceid_embeds_t = _torch.from_numpy(faceid_embeds)
 
         # 2. 用 ip-adapter proj model 得到 image prompt embeds(PlusXL 路径)
+        # CLIP Vision 编码器只在算 embeds 时用一次,之后整个去噪过程都不需要它。
+        # 但它默认常驻 cuda(632M params ≈ 1.3GB),是 8GB 预算下的主要浪费。
+        # 这里算完后立刻搬回 CPU,把显存让给 UNet。
         with _torch.inference_mode():
             image_prompt_embeds, uncond_image_prompt_embeds = self.ip_adapter.get_image_embeds(
                 faceid_embeds_t, face_pil, s_scale=1.0, shortcut=True,
@@ -250,7 +257,12 @@ class BigHeadPipeline:
             )
             # 4. concat image embeds 到 prompt embeds
             prompt_embeds = _torch.cat([prompt_embeds, image_prompt_embeds], dim=1)
-            negative_prompt_embeds = _torch.cat([negative_prompt_embeds, uncond_image_prompt_embeds], dim=1)
+            negative_prompt_embeds = _torch.cat(
+                [negative_prompt_embeds, uncond_image_prompt_embeds], dim=1
+            )
+
+            # embeds 已在 GPU 上算完,卸载 CLIP Vision 腾出显存给去噪阶段
+            self._offload_image_encoder()
 
             gen = _torch.Generator(device="cuda").manual_seed(int.from_bytes(os.urandom(2), "big"))
             images = self.pipe(
@@ -265,6 +277,36 @@ class BigHeadPipeline:
                 height=h,
             ).images
         return images[0]
+
+    def _offload_image_encoder(self) -> None:
+        """把 CLIP Vision / proj model 搬回 CPU,腾出 GPU 显存给 UNet 去噪."""
+        ip = self.ip_adapter
+        if ip is None:
+            return
+        for attr in ("image_encoder", "image_proj_model"):
+            mod = getattr(ip, attr, None)
+            if mod is None:
+                continue
+            try:
+                mod.to("cpu")
+            except Exception as e:  # pragma: no cover
+                log.debug("offload %s failed: %s", attr, e)
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def _ensure_image_encoder_on_gpu(self) -> None:
+        """生成前把 CLIP Vision / proj model 搬回 GPU(与 _offload_image_encoder 成对)."""
+        ip = self.ip_adapter
+        if ip is None:
+            return
+        for attr in ("image_encoder", "image_proj_model"):
+            mod = getattr(ip, attr, None)
+            if mod is None:
+                continue
+            try:
+                mod.to(ip.device, dtype=ip.torch_dtype)
+            except Exception as e:  # pragma: no cover
+                log.debug("restore %s failed: %s", attr, e)
 
     async def generate_async(
         self,

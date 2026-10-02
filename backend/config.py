@@ -5,6 +5,29 @@ import os
 from pathlib import Path
 
 # ----------------------------------------------------------------------------
+# Environment(必须在导入 torch / diffusers / transformers 之前设置)
+# ----------------------------------------------------------------------------
+# 强制禁用系统代理,避免 HF 下载被代理拦截
+for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+    os.environ[_k] = ""
+os.environ.setdefault("NO_PROXY", "*")
+os.environ.setdefault("no_proxy", "*")
+
+# 把 HF 缓存重定向到项目本地,避开沙箱外的全局盘(通常不可写)
+HF_HOME = Path(__file__).resolve().parent / "vendor" / "hf_cache"
+HF_HOME.mkdir(parents=True, exist_ok=True)
+os.environ["HF_HOME"] = str(HF_HOME)
+os.environ["HUGGINGFACE_HUB_CACHE"] = str(HF_HOME)
+os.environ["HF_HUB_CACHE"] = str(HF_HOME)
+# TRANSFORMERS_CACHE 在 transformers v5 已废弃,仅为兼容旧版本保留
+os.environ.setdefault("TRANSFORMERS_CACHE", str(HF_HOME))
+
+# CUDA kernel 缓存,避免写入用户 AppData(沙箱通常禁止)
+os.environ.setdefault(
+    "CUDA_CACHE_PATH", str(Path(__file__).resolve().parent.parent / ".cuda_cache")
+)
+
+# ----------------------------------------------------------------------------
 # Paths
 # ----------------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -33,10 +56,12 @@ FACEID_LORA_SD15 = MODEL_BASE / "Lora" / "ip-adapter-faceid-plusv2_sd15_lora.saf
 # ----------------------------------------------------------------------------
 # Runtime
 # ----------------------------------------------------------------------------
-VRAM_BUDGET_GB = 7.0
+VRAM_BUDGET_GB = 8.0
 SDXL_STEPS = 20
 SDXL_CFG = 6.5
-# SDXL 默认 512x768:8GB 显存内能稳跑(实测峰值 8.16GB);用户也可在 UI 选更大尺寸
+# 实测峰值(5070 Ti, steps=20, CLIP Vision 用完即卸):
+#   512x768 -> 6.46GB / 640x960 -> 6.52GB / 768x1152 -> 6.61GB
+# 均在 8GB 预算内;默认取 512x768 以获得最严格的身份保持(cosine≈0.51)
 SDXL_SIZE = (512, 768)  # 宽 × 高
 SD15_SIZE = (512, 768)
 FACEID_SCALE = 0.7

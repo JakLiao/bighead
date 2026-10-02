@@ -29,6 +29,7 @@ backend/vendor/clip_vision/
 .env.local
 .venv/
 venv/
+.cuda_cache/
 
 # IDE
 .vscode/

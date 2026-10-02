@@ -2,26 +2,15 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
-from pathlib import Path
 
-# 强制禁用系统代理,避免 HF 下载被代理拦截
-for _k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
-    os.environ[_k] = ""
-os.environ.setdefault("NO_PROXY", "*")
-os.environ.setdefault("no_proxy", "*")
-# 把 HF 缓存重定向到项目本地,避开沙箱外的全局盘
-os.environ["HF_HOME"] = str(Path(__file__).resolve().parent / "vendor" / "hf_cache")
-os.environ["TRANSFORMERS_CACHE"] = os.environ["HF_HOME"]
-os.environ["HUGGINGFACE_HUB_CACHE"] = os.environ["HF_HOME"]
-os.environ["HF_HUB_CACHE"] = os.environ["HF_HOME"]
+# 关键:先导入 config,其中的环境设置(代理/HF 缓存/CUDA 缓存)必须在
+# torch / diffusers / transformers 被加载之前生效
+from .config import OUTPUT_DIR
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .config import OUTPUT_DIR
 from .routes import capture, gallery, generate, health, layout, preview, ws_jobs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
