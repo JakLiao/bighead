@@ -1,0 +1,34 @@
+# 输出产物
+outputs/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# 模型权重与 HuggingFace 缓存(体积大,不入库)
+# 说明:vendor 下只有 ip_adapter/ 是自研源码,需要入库;
+#       clip_vision/ 与 hf_cache/ 是权重和缓存,可通过 setup 脚本重新获取
+backend/vendor/hf_cache/
+backend/vendor/clip_vision/
+*.safetensors
+*.ckpt
+*.bin
+*.onnx
+*.pth
+
+# 环境
+.env
+.env.local
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

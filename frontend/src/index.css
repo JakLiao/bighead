@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(circle at top left, #ffe9d6 0%, transparent 40%),
+    radial-gradient(circle at bottom right, #ffd8e1 0%, transparent 40%),
+    #fff8ee;
+}
+
+.font-pixel {
+  font-family: "Press Start 2P", system-ui, sans-serif;
+}
+
+.font-mono-retro {
+  font-family: "VT323", monospace;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid #ff6b6b;
+  outline-offset: 2px;
+}
+
+/* 快门白闪 */
+@keyframes shutter-flash {
+  0% { opacity: 0; }
+  10% { opacity: 0.95; }
+  100% { opacity: 0; }
+}
+.shutter-flash {
+  animation: shutter-flash 220ms ease-out;
+}
+
+/* 倒计时数字 */
+@keyframes countdown-pop {
+  0% { transform: scale(0.3); opacity: 0; }
+  20% { transform: scale(1.2); opacity: 1; }
+  80% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+.countdown-num {
+  animation: countdown-pop 900ms ease-out;
+}
