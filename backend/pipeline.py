@@ -52,8 +52,9 @@ class BigHeadPipeline:
         self.pipe = None
         self.ip_adapter = None
         self.current_backbone = None
-        # VELVIA LoRA 是否真的生效(load 成功即生效,fuse 只是加速)
+        # 胶片 LoRA 是否生效(load 成功即生效)
         self.lora_active = False
+        self.lora_adapter = "film"
         # 允许临时关闭 LoRA(用于 A/B 对照或显存吃紧时)
         self.lora_enabled = os.environ.get("BIGHEAD_LORA", "1") not in ("0", "false", "False")
 
@@ -106,8 +107,10 @@ class BigHeadPipeline:
             original_config=str(sd_xl_yaml),
         )
 
-        # 显存控制:不开 cpu_offload(由 ip-adapter PlusXL 自己管 device),
-        # 保留 vae_tiling 和 attention_slicing 控制峰值
+        # 显存控制:开 model_cpu_offload,用 hook 在每次 forward 时把子模块
+        # 在 GPU/CPU 间搬运,峰值显存从 ~13GB 压到 ~6.6GB(8GB 预算的硬需求)。
+        # 代价是 torch.cuda.memory_allocated() 平时接近 0(权重都在 CPU),
+        # 排查显存问题时不要被这个数字误导,要看 max_memory_allocated。
         try:
             pipe.enable_vae_tiling()
         except Exception:
@@ -117,7 +120,7 @@ class BigHeadPipeline:
         except Exception:
             pass
 
-        # LoRA(VELVIA 胶片)
+        # LoRA:必须早于 IP-Adapter 注入(见 _apply_velvia_lora 的说明)
         self._apply_velvia_lora(pipe)
 
         # IP-Adapter FaceID Plus SDXL(锁脸能力更强,需 image_encoder)
@@ -296,22 +299,56 @@ class BigHeadPipeline:
             log.warning("style LoRA load failed: %s", e)
             return False
 
-        # 显式设定 scale:load 时的 lora_scale 只影响默认权重,这里保证生效值正确
-        try:
-            pipe.set_adapters([adapter], adapter_weights=[LORA_SCALE])
-        except Exception as e:
-            log.warning("set_adapters failed (scale=%s): %s", LORA_SCALE, e)
+        # 不做 fuse_lora:它会把 LoRA 原地烘进主干权重,不可逆。
+        # 而每个风格声明了自己的 lora_scale(0.4~0.9),fuse 之后就再也
+        # 没法按风格调节了 —— 早期实现只在加载时按全局 LORA_SCALE 融一次,
+        # 导致四个风格里有三个的强度配置完全没生效。
+        # 保持未融合状态后,每次生成前调一次 set_scale 即可,
+        # 代价是每步去噪多一次 LoRA 计算。
+        #
+        # 注意这里不能用 pipe.set_adapters():本项目开了
+        # enable_model_cpu_offload,offload 后的权重是 inference tensor,
+        # 而 set_adapters 内部会 requires_grad_(True) 重新激活 adapter,
+        # 对 inference tensor 设 requires_grad 会直接抛异常。
+        # _set_style_lora_scale 绕开激活步骤,只改 scale。
+        self.lora_active = True
+        self.lora_adapter = adapter
+        self._set_style_lora_scale(pipe, LORA_SCALE)
+        log.info(
+            "style LoRA loaded (unfused, scale adjustable per style): %s",
+            lora_path.name,
+        )
+        return True
 
+    def _set_style_lora_scale(self, pipe, scale: float) -> None:
+        """按当前风格调整 LoRA 强度(仅未融合模式可用)。
+
+        不能用 pipe.set_adapters():它走 PEFT 的 set_weights_and_activate_adapters,
+        内部会 requires_grad_(True) 把 adapter 重新激活,而本项目开了
+        enable_model_cpu_offload —— offload 后的权重是 inference tensor,
+        对它设 requires_grad 会抛:
+            Setting requires_grad=True on inference tensor outside InferenceMode
+
+        这里只借用 diffusers 的同一个遍历函数,跳过激活步骤,
+        直接 set_scale —— 改的只是 scale 字典里的浮点数,不动任何张量属性。
+        """
+        if not self.lora_active:
+            return
+        adapter = getattr(self, "lora_adapter", "film")
         try:
-            pipe.fuse_lora(lora_scale=LORA_SCALE, safe_fusing=True)
-            log.info("style LoRA fused at scale %.2f", LORA_SCALE)
-            self.lora_active = True
-            return True
+            from peft.tuners.tuners_utils import BaseTunerLayer
+
+            n = 0
+            for _, module in pipe.unet.named_modules():
+                if isinstance(module, BaseTunerLayer) and hasattr(module, "set_scale"):
+                    module.set_scale(adapter, float(scale))
+                    n += 1
+            if n == 0:
+                log.warning("no PEFT tuner layer found; lora_scale stays at default")
+            else:
+                log.debug("style lora_scale=%.2f applied to %d layers", scale, n)
         except Exception as e:
-            # 未融合也能生效:LoRA 会在每次去噪时通过 hook 参与计算,只是稍慢
-            log.warning("fuse_lora failed (%s); LoRA 保持未融合模式,仍会生效", e)
-            self.lora_active = True
-            return True
+            log.warning("per-style lora_scale=%.2f failed: %s", scale, e)
 
     # ------------------------------------------------------------------
     # 生成
@@ -360,6 +397,14 @@ class BigHeadPipeline:
 
         if faceid_scale is not None:
             self.ip_adapter.set_scale(faceid_scale)
+        elif style.get("faceid_scale") is not None:
+            # 风格各自声明锁脸强度;generate_async 之前没传这个参数,
+            # 导致 style_cfg["faceid_scale"] 一直是死的。
+            self.ip_adapter.set_scale(float(style["faceid_scale"]))
+
+        # 胶片 LoRA 强度同样按风格取值(未融合模式才可调,见 _apply_velvia_lora)
+        if style.get("lora_scale") is not None:
+            self._set_style_lora_scale(self.pipe, float(style["lora_scale"]))
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -532,7 +577,9 @@ class BigHeadPipeline:
                     emb = fr.embedding
 
                 img = self.generate_one(
-                    face_pil, style_cfg, backbone=backbone, steps=steps, faceid_embeds=emb
+                    face_pil, style_cfg, backbone=backbone, steps=steps,
+                    faceid_embeds=emb,
+                    faceid_scale=float(style_cfg.get("faceid_scale", FACEID_SCALE)),
                 )
                 out_path = out_dir / f"ai_{i+1}.jpg"
                 img.convert("RGB").save(out_path, quality=92)

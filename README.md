@@ -44,11 +44,13 @@ npm run dev
 
 ## 显存预算(实测)
 
-RTX 5070 Ti,SDXL + FaceID + 胶片 LoRA,steps=20,固定 seed 实测:
+RTX 5070 Ti,SDXL + FaceID + 胶片 LoRA(未融合),steps=20,固定 seed 实测:
 
-| 分辨率 | 峰值显存(LoRA 关) | 峰值显存(LoRA 开) | 身份相似度 |
-|---|---|---|---|
-| 512×768 | 6.46 GB | 6.63 GB | 0.5025 → 0.5046 |
+| 项 | 数值 |
+|---|---|
+| 峰值显存 | 6.65 GB |
+| 单张耗时 | ~7.8s(4 张 31s) |
+| 身份相似度 | 0.46 ~ 0.64(16 张实测) |
 
 均低于 8GB 预算。关闭 AI 时不加载任何模型,几乎不占显存。
 
@@ -79,6 +81,9 @@ $PY scripts\verify_film_lora.py
 
 # 真实照片全流程(4 个风格各 4 张,含身份相似度与显存)
 $PY scripts\verify_flow_real.py
+
+# 风格级 LoRA / FaceID 强度是否真的生效(读 PEFT LoraLayer.scaling)
+$PY scripts\verify_lora_scale.py
 
 # 风格差异量化(两两色相直方图 TV 距离)
 $PY scripts\verify_style_diff.py
@@ -119,6 +124,44 @@ Kohya key 里 `attn2_to_k.lora_down` 的第二维就是 `cross_attention_dim`,
 SDXL 的胶片 LoRA 靠触发词 `Film Grain, FilmGrainAF` 激活,`generate_one`
 只在 `lora_active` 为真时把它追加进 prompt —— 权重没加载时这两个 token
 没有对应参数,留着只是噪声。
+
+### 风格级强度:为什么不 fuse_lora
+
+每个风格在 `STYLES` 里声明自己的 `lora_scale`(0.4~0.9)与
+`faceid_scale`(0.65~0.85),`generate_one` 每次生成前按当前风格写入。
+
+早期实现用 `fuse_lora()` 融合,它是**不可逆**的 —— 权重被原地烘进
+UNet 主干,之后再也无法按风格调节,导致四个风格里有三个的 `lora_scale`
+和一个全部 `faceid_scale` 实际是死值。现改为保持未融合,靠
+`LoraLayer.set_scale()` 运行时调,代价是每步去噪多一次 LoRA 计算
+(实测 4 张 31s,融合时 25s,约 +24%)。
+
+调强度**不能**用 `pipe.set_adapters()`:它内部走 PEFT 的
+`set_weights_and_activate_adapters`,会对 adapter 重新
+`requires_grad_(True)`,而本项目开了 `enable_model_cpu_offload`,
+offload 后的权重是 inference tensor,对它设 `requires_grad` 直接抛
+`Setting requires_grad=True on inference tensor outside InferenceMode`。
+`_set_style_lora_scale` 绕开激活步骤,只改 `LoraLayer.scaling` 字典
+里的浮点数,不碰任何张量属性。
+
+### 显存与内存行为
+
+SDXL 路线开了 `enable_model_cpu_offload`,用 hook 在每次 forward 时把
+子模块在 GPU/CPU 间搬运,峰值显存从 ~13GB 压到 ~6.6GB。因此:
+
+- `torch.cuda.memory_allocated()` 平时接近 **0**(权重在 CPU),
+  排查显存要看 `max_memory_allocated()`,不要被前者误导。
+- 每生成一张会把 CLIP Vision 搬到 CPU、下张再搬回 GPU
+  (`_offload_image_encoder` / `_ensure_image_encoder_on_gpu`),
+  这是 8GB 预算下的必要取舍。
+- 实测连续换 4 个风格各 2 张:`rss` 稳定在 13.2~13.9GB,
+  `nvidia-smi` 稳定在 2475MB,**无泄漏**。
+- InsightFace 的 5 个 onnx session 只建一次(`face._get_app` 带缓存),
+  重复 detect 不涨内存。
+
+`nvidia-smi --query-compute-apps` 在 Windows 上会列出所有持有
+D3D/CUDA context 的进程(含系统组件、浏览器、笔记软件),看到几十个
+PID 属正常,不是泄漏。
 
 ### 产物目录
 
