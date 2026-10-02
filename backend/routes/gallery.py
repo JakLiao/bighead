@@ -19,6 +19,9 @@ async def gallery():
     for job_dir in sorted(OUTPUT_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if not job_dir.is_dir():
             continue
+        # 跳过下划线开头的内部目录(如 _smoke / _verify)
+        if job_dir.name.startswith("_") or job_dir.name.startswith("."):
+            continue
         thumbs: list[str] = []
         layout = job_dir / "layout.jpg"
         if layout.exists():

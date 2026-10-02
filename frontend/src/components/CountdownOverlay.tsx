@@ -6,12 +6,13 @@ interface Props {
 }
 
 export function CountdownOverlay({ show, onComplete }: Props) {
-  const [n, setN] = useState<3);
+  const [n, setN] = useState<number>(3);
 
   useEffect(() => {
     if (!show) return;
     setN(3);
     let count = 3;
+    let timer = 0;
     const tick = () => {
       count--;
       if (count <= 0) {
@@ -21,7 +22,7 @@ export function CountdownOverlay({ show, onComplete }: Props) {
       setN(count);
       timer = window.setTimeout(tick, 900);
     };
-    let timer = window.setTimeout(tick, 900);
+    timer = window.setTimeout(tick, 900);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [show]);

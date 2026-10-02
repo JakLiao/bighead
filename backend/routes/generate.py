@@ -66,4 +66,6 @@ async def job_status(job_id: str):
     j = get(job_id)
     if j is None:
         raise HTTPException(404, "no such job")
-    return j.model_dump()
+    # pydantic v1 用 .dict(),v2 用 .model_dump()
+    dump = getattr(j, "model_dump", None) or j.dict
+    return dump()
