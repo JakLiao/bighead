@@ -9,7 +9,6 @@ import { fetchMeta } from "../api";
 import type { FilterInfo } from "../types";
 
 const PHOTO_COUNT = 4;
-const INTERVAL_MS = 1500;
 
 export function HomePage() {
   const nav = useNavigate();
@@ -21,7 +20,11 @@ export function HomePage() {
   const [filters, setFilters] = useState<FilterInfo[]>([]);
   const [capturing, setCapturing] = useState(false);
   const [flash, setFlash] = useState(false);
-  const [showCountdown, setShowCountdown] = useState(false);
+  // 倒计时触发器:每次自增都会重启 CountdownOverlay 的计时。
+  // 不用 show 布尔量 —— 拍完第 1 张后 setShow(true) 的值与当前相同,
+  // React 会 bail out 且不重渲染,useEffect([show]) 不重跑,倒计时会
+  // 冻结在 1 永不触发 onComplete(表现为"已拍 1/4"卡死)。
+  const [snapTick, setSnapTick] = useState(0);
 
   useEffect(() => {
     fetchMeta().then((m) => setFilters(m.filters)).catch(() => {});
@@ -40,27 +43,35 @@ export function HomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [capturing]);
 
-  async function startCapture() {
+  function startCapture() {
     if (capturing) return;
     setCapturing(true);
     setFrames([]);
-    setShowCountdown(true);
+    setSnapTick((t) => t + 1);
   }
 
   function doSnap() {
     const url = snapFromCamera();
-    if (!url) return;
+    if (!url) {
+      // 摄像头还没出帧(videoWidth === 0)。这里必须继续排下一轮倒计时,
+      // 否则整个连拍会永久停住 —— 用户只能刷新页面。
+      // 最多重试 SNAP_MAX_RETRY 次,避免摄像头始终不可用时无限循环。
+      if (frames.length < SNAP_MAX_RETRY) {
+        setSnapTick((t) => t + 1);
+      } else {
+        setCapturing(false);
+      }
+      return;
+    }
     setFlash(true);
     setTimeout(() => setFlash(false), 250);
     const next = [...frames, url];
     setFrames(next);
     if (next.length >= PHOTO_COUNT) {
-      // 拍完了
-      setShowCountdown(false);
       setCapturing(false);
       setTimeout(() => nav("/decorate"), 400);
     } else {
-      setShowCountdown(true); // 下一张重新倒计时
+      setSnapTick((t) => t + 1);
     }
   }
 
@@ -81,7 +92,7 @@ export function HomePage() {
       <div className="relative">
         {/* 摄像头全程保持挂载:连拍期间反复开关会触发 getUserMedia 竞态与设备抢占 */}
         <LiveCamera onCapture={() => {}} active={true} />
-        <CountdownOverlay show={showCountdown} onComplete={doSnap} />
+        <CountdownOverlay tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
       </div>
 
@@ -122,3 +133,6 @@ export function HomePage() {
     </div>
   );
 }
+
+// 摄像头连续取不到帧时的重试上限
+const SNAP_MAX_RETRY = PHOTO_COUNT * 3;
