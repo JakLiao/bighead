@@ -38,6 +38,28 @@ async def subscribe(job_id: str) -> asyncio.Queue:
     return q
 
 
+def snapshot_message(job_id: str) -> str | None:
+    """把任务当前状态序列化成一条 WS 消息,任务不存在时返回 None。
+
+    这是修「AI 生成永远 0/0」的关键。前端 doLayout 里
+    setCurrentJobId() 触发的 WS 连接是异步的,而 startGeneration()
+    紧跟着就返回,后端立刻开始生成并 broadcast —— WS 还没 accept 完,
+    _connections 里还没有订阅者,进度消息被全部丢弃:
+    running 收不到 -> 停在 0/0;done 也收不到 -> setBusy(false)
+    永不执行 -> 按钮一直转。
+
+    进度是「最新状态」语义,所以订阅时补发一次当前快照即可:
+    无论客户端什么时候连上,都能立刻拿到终态,不必依赖不丢失的广播。
+    """
+    from .jobs import get  # 局部导入避免 ws <-> jobs 循环依赖
+
+    job = get(job_id)
+    if job is None:
+        return None
+    dump = getattr(job, "model_dump", None) or job.dict
+    return json.dumps(dump(), ensure_ascii=False)
+
+
 async def unsubscribe(job_id: str, q: asyncio.Queue) -> None:
     if q in _connections.get(job_id, []):
         _connections[job_id].remove(q)

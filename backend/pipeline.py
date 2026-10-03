@@ -1,6 +1,7 @@
 """SDXL + IP-Adapter FaceID + VELVIA LoRA 推理(单例懒加载)."""
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
@@ -668,23 +669,31 @@ class BigHeadPipeline:
         for i, fp in enumerate(frame_paths):
             try:
                 await ws.broadcast(job_id, {"status": "running", "current": i, "total": total, "msg": f"生成第 {i+1}/{total} 张"})
-                pil = Image.open(fp)
-                pil.load()
-                fr = extract_face(pil)
-                if fr.no_face:
-                    # 检不到脸时保持原比例缩放,不能拉伸成正方形(会严重变形)
-                    log.warning("[%s] no face in %s, using full image", job_id, Path(fp).name)
-                    face_pil = _fit_within(pil, 768)
-                    emb = None
-                else:
-                    face_pil = fr.face_pil
-                    emb = fr.embedding
+                # 整段推理放到工作线程。SDXL 单张约 4s,同步跑在事件循环里
+                # 会把整个 asyncio 循环卡住:这期间新的 WebSocket 连不上
+                # (客户端握手超时)、心跳也发不出去。表现为「AI 生成
+                # 永远 0/0」—— 前端连上了但收不到任何消息。
+                # generate_one 内部无 asyncio 依赖,可安全在线程里跑。
+                def _work(fp: str = fp, i: int = i) -> "Image.Image":
+                    pil = Image.open(fp)
+                    pil.load()
+                    fr = extract_face(pil)
+                    if fr.no_face:
+                        # 检不到脸时保持原比例缩放,不能拉伸成正方形(会严重变形)
+                        log.warning("[%s] no face in %s, using full image", job_id, Path(fp).name)
+                        face_pil = _fit_within(pil, 768)
+                        emb = None
+                    else:
+                        face_pil = fr.face_pil
+                        emb = fr.embedding
 
-                img = self.generate_one(
-                    face_pil, style_cfg, backbone=backbone, steps=steps,
-                    faceid_embeds=emb,
-                    faceid_scale=float(style_cfg.get("faceid_scale", FACEID_SCALE)),
-                )
+                    return self.generate_one(
+                        face_pil, style_cfg, backbone=backbone, steps=steps,
+                        faceid_embeds=emb,
+                        faceid_scale=float(style_cfg.get("faceid_scale", FACEID_SCALE)),
+                    )
+
+                img = await asyncio.to_thread(_work)
                 out_path = out_dir / f"ai_{i+1}.jpg"
                 img.convert("RGB").save(out_path, quality=92)
                 out_paths.append(str(out_path))

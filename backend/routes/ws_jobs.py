@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -26,6 +27,15 @@ async def job_ws(websocket: WebSocket, job_id: str):
     q = await wsmod.subscribe(job_id)
     terminal_at: float | None = None
     try:
+        # 订阅后立刻补发当前状态。前端可能在生成已经开始(甚至已结束)
+        # 之后才连上,此时广播早已发完、队列是空的,不补发就会永远停在
+        # 「AI 生成中 0/0」。快照让订阅与广播解耦,见 ws.snapshot_message。
+        snap = wsmod.snapshot_message(job_id)
+        if snap is not None:
+            q.put_nowait(snap)
+            if _is_terminal(json.loads(snap).get("status", "")):
+                terminal_at = asyncio.get_event_loop().time()
+
         while True:
             # 终态后再挂 _IDLE_CLOSE_SECONDS 就主动收尾,
             # 不让订阅无限期占用一条队列。
@@ -49,9 +59,7 @@ async def job_ws(websocket: WebSocket, job_id: str):
                 break
             await websocket.send_text(msg)
             try:
-                import json as _json
-
-                if _is_terminal(_json.loads(msg).get("status", "")):
+                if _is_terminal(json.loads(msg).get("status", "")):
                     terminal_at = asyncio.get_event_loop().time()
             except Exception:
                 pass

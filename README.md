@@ -275,6 +275,41 @@ PID 属正常,不是泄漏。
 到期服务端自己断开,不让订阅无限期占着一条队列(客户端崩溃时
 `send_text` 未必立刻抛错)。
 
+### AI 生成永远停在 0/0
+
+勾选 AI 复古写真后点生成，按钮一直是「AI 生成中 0/0」，但最终拼图
+用的是原图(不是 AI 产物)。**后端其实生成成功了** —— 日志里
+`generated ai_1..4.jpg` 都在。这是两个叠加的传输层缺陷:
+
+**1. 订阅晚于广播。** 前端 `doLayout` 里 `setCurrentJobId()` 触发的 WS
+连接是异步的,而 `startGeneration()` 紧跟着就返回,后端立刻开始生成并
+`broadcast`。WS 还没 accept 完,`_connections` 里没有订阅者,进度消息
+全部丢弃:running 收不到 → 停在 0/0;done 也收不到 →
+`setBusy(false)` 永不执行 → 按钮一直转。
+
+进度本就是「最新状态」语义,所以订阅时补发一次当前快照即可
+(`ws.snapshot_message`),把订阅与广播解耦。
+
+**2. 推理阻塞事件循环。** `pipeline.generate_async` 虽然是 async,
+内部却直接调同步的 `generate_one`,SDXL 单张约 4s 把整个 asyncio
+循环卡死。这期间**新 WebSocket 连不上**(客户端握手超时),心跳也发不出去。
+即使有快照补发,连接本身也建立不起来。
+
+现在整段推理用 `asyncio.to_thread` 挪到工作线程,事件循环保持响应。
+`generate_one` 会改共享的 ip_adapter scale 与 LoRA scaling,但
+`to_thread` + 串行 for 循环保证同一时刻只有一个推理在跑,不存在竞争。
+
+验证(`scripts/_verify_ws_race_fix.py`,严格按前端时序:先 POST
+`generate/start` 再连 WS):
+
+```
+[  0.0s] <- running current=0/4     <- 修复前连不上(握手超时)
+[ 37.5s] <- running current=1/4
+[ 41.0s] <- running current=2/4
+[ 44.5s] <- running current=3/4
+[ 48.1s] <- done    current=4/4 images=4
+```
+
 ### 肤色偏红校正
 
 出图默认偏红有三个叠加原因,已分别处理:
