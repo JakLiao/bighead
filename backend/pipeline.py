@@ -135,12 +135,28 @@ class BigHeadPipeline:
         )
         ip.set_scale(FACEID_SCALE)
 
-        # 把 pipeline 搬到 cpu(由 ip-adapter 把需要的部分动态搬到 cuda)
-        # 这样峰值显存从 13GB 压到 ~6-7GB
-        try:
-            pipe.enable_model_cpu_offload()
-        except Exception as e:
-            log.warning("enable_model_cpu_offload failed: %s", e)
+        # 显存策略:
+        #   默认开 model_cpu_offload —— hook 在每个模块 forward 前后把权重
+        #   搬出/搬回 GPU,峰值从 ~13GB 压到 ~6.6GB。代价是 GPU 大部分
+        #   时间在等 PCIe 传输(任务管理器里 3D 利用率只有 18%),
+        #   且显存曲线呈剧烈锯齿。
+        #   BIGHEAD_NO_OFFLOAD=1 时整条 pipeline 常驻显存,快得多,
+        #   适合显存充足(>=12GB)的机器。实测数据见 README。
+        if os.environ.get("BIGHEAD_NO_OFFLOAD", "0") in ("1", "true", "True"):
+            try:
+                pipe.to("cuda")
+                log.info("model_cpu_offload DISABLED -> full GPU residency")
+            except Exception as e:
+                log.warning("pipe.to(cuda) failed (%s); falling back to offload", e)
+                try:
+                    pipe.enable_model_cpu_offload()
+                except Exception as e2:
+                    log.warning("enable_model_cpu_offload failed: %s", e2)
+        else:
+            try:
+                pipe.enable_model_cpu_offload()
+            except Exception as e:
+                log.warning("enable_model_cpu_offload failed: %s", e)
 
         self.pipe = pipe
         self.ip_adapter = ip
@@ -588,8 +604,18 @@ class BigHeadPipeline:
         log.info("skin cast corrected: R-B %.1f -> %.1f (delta=%.1f)", rb, target, delta)
         return Image.fromarray(out.astype(np.uint8))
 
+    def _gpu_resident(self) -> bool:
+        """是否整条 pipeline 常驻显存(未开 model_cpu_offload)。
+
+        常驻模式下 CLIP Vision 没必要再往 CPU 搬:显存本来就够,
+        每次生成多两次 PCIe 往返纯属浪费。
+        """
+        return os.environ.get("BIGHEAD_NO_OFFLOAD", "0") in ("1", "true", "True")
+
     def _offload_image_encoder(self) -> None:
         """把 CLIP Vision / proj model 搬回 CPU,腾出 GPU 显存给 UNet 去噪."""
+        if self._gpu_resident():
+            return
         ip = self.ip_adapter
         if ip is None:
             return
@@ -606,6 +632,8 @@ class BigHeadPipeline:
 
     def _ensure_image_encoder_on_gpu(self) -> None:
         """生成前把 CLIP Vision / proj model 搬回 GPU(与 _offload_image_encoder 成对)."""
+        if self._gpu_resident():
+            return
         ip = self.ip_adapter
         if ip is None:
             return

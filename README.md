@@ -58,6 +58,69 @@ RTX 5070 Ti,SDXL + FaceID + 胶片 LoRA(未融合),steps=20,固定 seed 实测:
 只在下次生成时搬回。去噪阶段完全不需要它,腾出的显存让 UNet 独占,
 显存降 1.7GB、速度提升约 1 倍。
 
+### 驼峰状显存曲线
+
+任务管理器里显存像锯齿一样涨落,**不是泄漏**,是
+`enable_model_cpu_offload` 的正常行为:diffusers 用 forward pre/post hook
+在每个子模块执行前后把它在 GPU/CPU 之间搬一遍,搬上去用完就搬下来。
+所以曲线是「搬上去 → 干活 → 搬下来」的重复,收敛在固定水位。
+
+由此带来两个容易踩的坑:
+
+- `torch.cuda.memory_allocated()` 在两次 forward 之间**接近 0**
+  (权重在 CPU),排查显存必须看 `max_memory_allocated()`。
+- `_offload_image_encoder` / `_ensure_image_encoder_on_gpu` 每张图要把
+  CLIP Vision 搬回 GPU 一次,在 8GB 预算下这是必要取舍。
+
+### 开关一:整条 pipeline 常驻显存(提速 1.56x)
+
+`BIGHEAD_NO_OFFLOAD=1` 时改走 `pipe.to("cuda")`,不再逐模块搬运。
+`scripts/bench_offload.py` 在**独立子进程**里对照两种模式(同进程跑会被
+上一轮的 CUDA hook 污染,结论不可信):
+
+| 模式 | 单张 | torch 峰值 | nvidia-smi | offload hooks |
+|---|---|---|---|---|
+| offload(默认) | 6.86 s | 6.65 GB | 3311 MB | 有 |
+| 常驻(`BIGHEAD_NO_OFFLOAD=1`) | 4.39 s | 11.65 GB | 15351 MB | 无 |
+
+- 提速 **1.56x**(4 张 27s → 18s),代价是多占约 5GB 显存。
+- 两种模式产物 MAE = 0.77,肉眼无差异 —— 差异只来自搬运机制,
+  不是生成路径变了。
+- 常驻模式下 `_offload_image_encoder` / `_ensure_image_encoder_on_gpu`
+  直接返回,省掉每张图两次无意义的 PCIe 往返。
+- 17.1GB 卡上常驻 11.65GB(torch)/ 15.35GB(nvidia-smi),
+  能跑,但留给 Windows 和其他应用的余量明显变小。
+
+```powershell
+# 8GB 预算(默认,原设计口径)
+E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8000
+
+# 整条常驻显存(更快,占 11.65GB)
+$env:BIGHEAD_NO_OFFLOAD="1"
+E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8000
+```
+
+### 开关二:智能裁切(消除拼贴留白)
+
+相机原图是 1280×720 横图,格位是竖版,旧的 `_resize_to_grid` 用
+`thumbnail` + 居中贴到白底格子,横向被裁掉、上下留出大片空白
+(实测**格位留白 57.5%**)。
+
+`_face_focus()` + `_smart_crop()` 改成**按目标比例裁源图再缩放**,
+并用 InsightFace 最大人脸的 bbox 中心做焦点(纵向再上提 6%,
+避免顶到头顶)。默认开启,`BIGHEAD_SMART_CROP=0` 可回退旧行为。
+
+`scripts/verify_collage_crop.py` 用真实 1280×720 拍摄图验证:
+
+```
+单格留白: 57.8% -> 0.0%
+人脸占比: 16.14% -> 39.35%(几何裁切) / 38.58%(人脸焦点裁切)
+整版留白: 57.5% -> 0.0%
+PASS=6 FAIL=0
+```
+
+对照图在 `outputs/_verify/crop/collage_legacy.jpg` 与 `collage_smart.jpg`。
+
 ## 测试与验证
 
 ```bash
@@ -96,6 +159,12 @@ $PY scripts\verify_live.py
 
 # 列出 Lora 目录并判定每个权重适配 SD1.5 还是 SDXL
 $PY scripts\check_sdxl_lora.py
+
+# offload vs 常驻显存对照(子进程隔离,含峰值显存与产物 MAE)
+$PY scripts\bench_offload.py
+
+# 智能裁切验证(真实 1280x720 拍摄图,量留白与人脸占比)
+$PY scripts\verify_collage_crop.py
 ```
 
 `verify_ai.py` 会用 InsightFace 提取原图与生成图的 512 维人脸向量,
@@ -165,6 +234,46 @@ SDXL 路线开了 `enable_model_cpu_offload`,用 hook 在每次 forward 时把
 `nvidia-smi --query-compute-apps` 在 Windows 上会列出所有持有
 D3D/CUDA context 的进程(含系统组件、浏览器、笔记软件),看到几十个
 PID 属正常,不是泄漏。
+
+### 两处无界增长(已收敛)
+
+上面说的「无泄漏」指 VRAM/RSS 在正常业务下不涨。审查代码时另外发现
+两处**长期运行会无界增长**的容器,已改成有界:
+
+**`ws.py` 订阅队列**:早先用无界 `asyncio.Queue()`。只要有一个客户端
+连上却不消费(后台标签页被节流、页面崩溃没走 close),`broadcast` 每次
+`put_nowait` 都把消息永久堆在队列里。现在 `maxsize=32`,满了丢最旧的
+一条 —— 进度消息是「最新状态」语义,丢过期进度比堆积更有用。
+另外 `unsubscribe` 现在会 `pop` 掉空的 job key,否则空 list 永久驻留。
+
+`scripts/_ws_isolated_test.py` 实测(200 订阅者 × 2000 广播):
+
+```
+修复前无界缓冲: 400000 条
+修复后:         6400 条(= 200 × 32 上限)
+最新消息仍是 'done'(drop-oldest 语义正确)
+退订后 _connections size = 0(key 正确清理)
+```
+
+**`jobs.py` 任务字典**:`_jobs` 原本只增不减,每次拍摄 `new_job()` 一次,
+跑一整天累积几千条 `JobInfo`(每条含 images 列表)。现在按「最久未更新」
+淘汰到 `_MAX_JOBS=200`,并给刚完成的任务 1 小时保护期(`_TTL_SECONDS`)
+—— 保护期是软上限:若剩余条目都还在保护期内就允许暂时超过,
+宁可多留几条元数据也不能把前端正在轮询的任务状态删掉。
+前端 gallery 走 `outputs/` 目录扫描,不依赖这个字典,淘汰不会让历史照片消失。
+
+`scripts/_jobs_test.py` 实测:
+
+```
+50 个任务(未到上限)      -> 50,无误删
+450 个全新鲜             -> 450,软上限,不丢活跃任务
+同一批置为过期后触发淘汰 -> 200(= 上限)
+5000 个任务 + 时间流逝   -> 200,长期有界
+```
+
+`ws_jobs.py` 另加了终态后 600s 主动收尾:收到 `done`/`error` 后开始计时,
+到期服务端自己断开,不让订阅无限期占着一条队列(客户端崩溃时
+`send_text` 未必立刻抛错)。
 
 ### 肤色偏红校正
 
