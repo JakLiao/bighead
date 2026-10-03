@@ -1,0 +1,56 @@
+# Qwen-Image-Edit 独立环境依赖(2026-10-03)
+#
+# 为什么不复用 E:\Code\stable-diffusion-webui\.venv:
+# Qwen-Image-Edit 需要 diffusers>=0.36 / transformers>=4.51,
+# 而 SDXL 那套环境锁在 diffusers 0.34 + transformers 4.37.2,
+# 升级会打破 PEFT 本地补丁和 EncoderDecoderCache 兼容层。
+# 两个环境彻底隔离,SDXL 仍可随时回退对照。
+#
+# torch 不写在这里:CUDA 版本必须匹配驱动,单独装
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+#
+# 安装:
+#   python -m venv .venv-qwen
+#   .venv-qwen\Scripts\python -m pip install -r requirements-qwen.txt
+
+# --- 生成核心 ---
+# 版本组合是被迫的,不是随手写的(实测 2026-10-03):
+#   diffusers 0.40.0(最新版)要求 huggingface-hub >=1.23,<2.0
+#   transformers 4.51~4.57 全部要求 huggingface-hub >=0.34,<1.0
+#   两个区间不相交 -> diffusers 0.40 只能配 transformers 5.x
+#   (已逐个核对 4.51.0~4.57.6 的 requires_dist,无一例外)
+# 所以本环境固定 transformers 5.x。SDXL 那套环境仍是 4.37.2,不受影响。
+diffusers==0.40.0
+transformers>=5.18.0,<6.0        # 唯一支持 huggingface-hub 1.x 的系列
+gguf>=0.10.0                    # from_single_file 读 GGUF 必需
+accelerate>=1.1.0               # diffusers 0.40 要求 >=0.31;transformers 5 要求 >=1.1
+safetensors>=0.4.5
+# torchvision 不是 diffusers 的硬依赖,但 Qwen2VLProcessor.from_pretrained
+# 会自动去找它(报错 "requires torchvision to be installed")。
+# 版本必须与 torch 严格对齐:torch 2.11.0 -> torchvision 0.26.0。
+# 装法:pip install torchvision --index-url https://download.pytorch.org/whl/cu128
+torchvision>=0.26.0
+# text_encoder 必须量化,否则 16.58GB(BF16) + 13.24GB(GGUF) = 28.92GB
+# 远超 17.1GB 显存。8bit 也要 20.63GB,只有 NF4 4bit 理论可行(16.49GB)。
+bitsandbytes>=0.50.0
+
+# --- Web 服务 ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.12        # FastAPI 收 Form/File 必需
+pydantic>=2.9.0
+websockets>=13.0
+sse-starlette>=2.1.0
+
+# --- 图像 / 人脸 ---
+pillow>=10.4.0
+numpy>=1.26.0,<3.0
+
+# insightface 只用于「生成图 vs 原图」的身份余弦打分,不是运行时依赖。
+# 这里刻意不装:insightface 2.0 硬依赖 CPU 版 onnxruntime,与下面的
+# onnxruntime-gpu 互斥,会让 pip 直接报 ResolutionImpossible。
+# 离线验证脚本用 SDXL 环境里那份(insightface 0.7.3 + onnxruntime 1.22,
+# 已带 CUDAExecutionProvider)即可,不必在生成环境里重复装。
+#
+# 若确实要在此环境装人脸,改用:
+#   onnxruntime-gpu>=1.19.0   # 注意:不要同时装 insightface

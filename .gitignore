@@ -31,6 +31,13 @@ backend/vendor/clip_vision/
 venv/
 .cuda_cache/
 
+# Qwen-Image-Edit 专用虚拟环境。
+# 与 SDXL 那套(在 E:\Code\stable-diffusion-webui\.venv)彻底隔离,因为
+# diffusers 0.40 强制 transformers 5.x + huggingface-hub 1.x,而 SDXL 需要
+# transformers 4.37.2。两者不能共存于同一环境。
+# 版本组合见 requirements-qwen.txt,可用 pip -r 重建,不入库。
+.venv-qwen/
+
 # 项目内隔离安装的第三方依赖(PEFT 等)
 # 共享的 webui venv 缺 PEFT 且不允许写入,因此装到项目内 .pylibs,
 # 由 backend/peft_compat.py 在运行时注入 sys.path。

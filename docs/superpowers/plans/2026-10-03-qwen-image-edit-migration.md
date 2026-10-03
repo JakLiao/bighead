@@ -47,6 +47,78 @@ Qwen-Image-Edit-2511 是 image-to-image 编辑模型，输入原图 + 指令，*
 2. **速度**：Qwen-Image-Edit 默认 40 步，1024×1024 在 4090 上约 7.5s，4 张约 30s+。加上 20B 模型的 PCIe 搬运，**可能比你现在 SDXL 的 15s/4张更慢**。这点你已知悉后再决定是否接受。
 3. **磁盘**：Q4_K_M 12.34 GB + 文本编码器 ~9 GB + VAE ≈ **22 GB** 下载量。
 
+---
+
+## 实施记录（2026-10-03，Task 1~2 已完成）
+
+### 已验证可行
+
+| 项 | 结果 |
+|---|---|
+| 模型下载 | 魔塔 30.09 GB 全部到位，`verify_qwen_model_files.py` 22/22 PASS |
+| GGUF 加载 | 13.23B 参数，16 秒。dtype 分布 `{uint8: 846, bfloat16: 1087}` —— 动态反量化生效 |
+| 环境隔离 | `.venv-qwen` 建好，与 SDXL 环境零交集 |
+| 类可用性 | `QwenImageEditPlusPipeline` / `QwenImageTransformer2DModel` / `AutoencoderKLQwenImage` / `GGUFQuantizationConfig` / `Qwen2_5_VLForConditionalGeneration` / `Qwen2VLProcessor` 全部存在 |
+| 显存 | 加载后 19.47 GB（transformer GGUF 13.24 + text_encoder NF4 约 4.2 + VAE） |
+
+### 踩到的坑（都与最初设想不同）
+
+1. **版本组合是死结，不是选出来的**：
+   `diffusers 0.40.0` 要求 `huggingface-hub>=1.23,<2`；`transformers 4.51~4.57` 全部要求 `huggingface-hub<1.0`（已逐版本核对 requires_dist，无一例外）。
+   两个区间不相交 → **只能配 transformers 5.x**。这反过来验证了隔离环境的必要性。
+2. **`text_encoder` 必须量化**：BF16 16.58 GB + GGUF 13.24 GB = **28.92 GB**，远超 17.1 GB。
+   8bit 也要 20.63 GB，只有 NF4 4bit 理论可行（16.49 GB）。
+3. **`text_encoder` 不能留 CPU**：Qwen-Image-Edit 每次调用都跑它，与 transformer 同在一条计算链上。
+   留 CPU 会报 `index is on cuda:0, different from other tensors on cpu`。
+4. **Pipeline 参数名**：是 `processor` 不是 `image_processor`，传错直接 `TypeError`。
+5. **`Qwen2VLProcessor` 需要 `video_preprocessor_config.json`**：transformers 5.18 会去找 video 配置，
+   缺了报 `Unrecognized video processor` —— 即使只做图像编辑也必须存在。
+6. **Pipeline 构造参数名**：`scheduler / vae / text_encoder / tokenizer / processor / transformer`。
+7. **`callback_on_step_end` 必须返回 dict**，返回 None 会 `AttributeError`。
+8. **不给 `negative_prompt` 时 `true_cfg_scale` 静默失效**（会警告），等于白跑双倍计算。
+
+### 未解决：推理速度不可用（阻塞点）
+
+实测（RTX 5070 Ti，`sm_120`）：
+
+| 配置 | 结果 |
+|---|---|
+| 30 步 × 4 张，768×1024 | 15+ 分钟未出第一张 |
+| 4 步 × 1 张，768×1024 | 8+ 分钟未出结果 |
+| **2 步 × 1 张，512×512** | **5+ 分钟未出结果** |
+
+关键证据：**GPU 利用率 100%，SM 时钟 2902 MHz，但功耗只有 79.79 W**
+（该卡满载约 250 W）。GPU 大部分时间在**等待**而非计算。
+
+已定位到两个具体原因：
+
+1. **GGUF 走慢速反量化路径**：`DIFFUSERS_GGUF_CUDA_KERNELS` 默认为 `false`，
+   实测 `can_use_cuda_kernels = False`。此时每层 forward 都要把 uint8 权重
+   解压成 bf16，1934 个 tensor 逐个来。官方文档称开启可加速约 10%。
+2. **bitsandbytes NF4 快速内核未生效**：警告
+   `inner dimension (3420) is not aligned for fast kernel with blocksize=64,
+   falling back to slower implementation` —— Qwen2.5-VL 的 hidden dim 3420
+   不是 64 的倍数，4bit 快速矩阵乘内核用不上，退回逐元素实现。
+
+**注意**：512×512 / 2 步这种极小配置也要 5 分钟，说明瓶颈**不是**分辨率或步数，
+而是每次 forward 的固定开销（反量化 + 未对齐的 4bit 内核）。
+
+### 后续可选方向（需决策）
+
+| 方向 | 说明 | 预期 |
+|---|---|---|
+| A. 开 GGUF CUDA kernels | 装 `kernels` 库 + `DIFFUSERS_GGUF_CUDA_KERNELS=true` + `DIFFUSERS_TRUST_REMOTE_KERNELS=true` | 官方称约 10%，**大概率不够** |
+| B. 换 text_encoder 精度 | NF4 换成 8bit（20.63 GB 超显存）或换更小编码器 | 显存是硬约束 |
+| C. 接受慢速 | 降到 1~2 步 + 512 分辨率，或改为「生成一张 + 排版复用」 | 质量与速度妥协 |
+| D. 换量化格式 | 试 FP8/更高位宽的 GGUF，需更多显存 | 17.1 GB 是硬顶 |
+| E. 回退 SDXL + 改善输入 | 引导用户正对镜头、无旁人入镜（`photo_1` 失败正是旁人导致） | 零新增成本，见下 |
+
+**关于 E 的依据**：`photo_1` 的 InsightFace 框是 `(533,270)-(666,553)`，
+133×283 的竖长条横跨了用户与背景女性两人边界，误检导致 embedding 污染
+（与 `photo_2/3/4` 的余弦仅 0.04，而它们互相是 0.81~0.87）。
+所以**引导拍摄时避免旁人入镜**，比换一个锁不住脸的模型更可能见效。
+
+
 ### 已确认的决策（2026-10-03）
 
 - **D1 · 量化格式 = Q4_K_M（12.34 GB）**。17.1 GB 卡的社区甜点位，

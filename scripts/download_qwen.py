@@ -124,13 +124,29 @@ ITEMS = [
     # 采样用的离散化方式。缺任何一个都会在加载时报 KeyError。
     ("meta", REPO, "model_index.json", None, "Pipeline 组件索引"),
     ("scheduler", REPO, "scheduler/scheduler_config.json", None, "调度器配置"),
+    # tokenizer 目录:9 个文件全要。实测漏掉 video_preprocessor_config.json
+    # 会让 transformers 5.18 的 Qwen2VLProcessor.from_pretrained 直接抛
+    # "Unrecognized video processor" —— 它会去找 video 配置,没有就报错。
+    # tokenizer.json(11.4MB)比 vocab+merges 完整,fast tokenizer 依赖它。
     ("tokenizer", REPO, "tokenizer/tokenizer_config.json", None, "tokenizer 配置"),
     ("tokenizer", REPO, "tokenizer/merges.txt", None, "BPE merges"),
     ("tokenizer", REPO, "tokenizer/vocab.json", None, "词表"),
+    ("tokenizer", REPO, "tokenizer/tokenizer.json", None, "fast tokenizer 权重"),
+    ("tokenizer", REPO, "tokenizer/added_tokens.json", None, "added tokens"),
+    ("tokenizer", REPO, "tokenizer/special_tokens_map.json", None, "特殊 token 映射"),
+    ("tokenizer", REPO, "tokenizer/chat_template.jinja", None, "对话模板"),
     ("processor", REPO, "processor/preprocessor_config.json", None, "图像预处理配置"),
     ("processor", REPO, "processor/tokenizer_config.json", None, "processor tokenizer 配置"),
     ("processor", REPO, "processor/merges.txt", None, "processor merges"),
     ("processor", REPO, "processor/vocab.json", None, "processor 词表"),
+    ("processor", REPO, "processor/tokenizer.json", None, "processor fast tokenizer"),
+    ("processor", REPO, "processor/added_tokens.json", None, "processor added tokens"),
+    ("processor", REPO, "processor/special_tokens_map.json", None, "processor 特殊 token"),
+    ("processor", REPO, "processor/chat_template.jinja", None, "processor 对话模板"),
+    # transformers 5.x 加载 Qwen2VLProcessor 时强制要求 video 配置,
+    # 即使我们只做图像编辑也必须有,否则报 Unrecognized video processor。
+    ("processor", REPO, "processor/video_preprocessor_config.json", None,
+     "video 预处理配置(transformers 5.x 必需,即使只做图像编辑)"),
 ]
 
 
