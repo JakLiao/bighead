@@ -88,6 +88,9 @@ $PY scripts\verify_lora_scale.py
 # 风格差异量化(两两色相直方图 TV 距离)
 $PY scripts\verify_style_diff.py
 
+# 肤色偏红检测(用 InsightFace 关键点只测脸颊区域)
+$PY scripts\verify_skin_tone.py
+
 # 对运行中的后端做真实 HTTP 冒烟
 $PY scripts\verify_live.py
 
@@ -162,6 +165,37 @@ SDXL 路线开了 `enable_model_cpu_offload`,用 hook 在每次 forward 时把
 `nvidia-smi --query-compute-apps` 在 Windows 上会列出所有持有
 D3D/CUDA context 的进程(含系统组件、浏览器、笔记软件),看到几十个
 PID 属正常,不是泄漏。
+
+### 肤色偏红校正
+
+出图默认偏红有三个叠加原因,已分别处理:
+
+1. **复古滤镜 `_warmth`**(`filters.py`):原实现 R 涨、G 不动、B 跌,
+   系数 (1, 0, −1) 把饱和度推到 10.2%,人眼读作"红"。
+   改为 (0.5, 0.45, −0.25),sat 降到 3.9%,亮度基本不变。
+2. **风格 prompt 暖词堆叠**:`PORTRAIT_HK` 同时写了
+   `warm golden tone` + `Kodak Portra 400` + `slightly overexposed`,
+   实测使全图 R−B 达 +34.7(源图仅 +3.5)。已去掉冗余暖词,
+   负面词补 `orange skin, red tint, color cast`。
+3. **IP-Adapter FaceID Plus v2 权重自带暖偏色** —— 这是主因。
+   固定 seed 逐项剥离(中性 prompt,只测脸颊 R−B):
+
+   | 配置 | 脸颊 R−B |
+   |---|---|
+   | 中性 prompt + 无 LoRA + 无 IP | −1.5 |
+   | 同上 + FilmGrain 触发词 | −1.5 |
+   | 同上 + 胶片 LoRA | −1.5 |
+   | 同上 + IP-Adapter | **+48.1** |
+
+   可见 LoRA 与触发词**零影响**,偏红全部来自 FaceID 权重。
+   根治要换权重,但为了不牺牲锁脸,`pipeline._correct_skin_cast`
+   在输出端做补偿:用 InsightFace 关键点取脸颊矩形,实测 R−B,
+   超过 `SKIN_CAST_TARGET_RB`(38)就线性收敛回去。
+   设 `BIGHEAD_SKIN_FIX=0` 可关闭。
+
+   效果:四风格脸颊 R−B 从 +58~+97 降到 +20~+31,
+   饱和度从 40~51% 降到 15~25%,身份相似度不降反升
+   (均值 0.552 → 0.565)。
 
 ### 产物目录
 

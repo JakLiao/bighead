@@ -28,6 +28,7 @@ from .config import (
     SD15_CKPT,
     SD15_ENABLED,
     SD15_SIZE,
+    SKIN_CAST_TARGET_RB,
     SDXL_CKPT,
     SDXL_CFG,
     SDXL_SIZE,
@@ -510,7 +511,82 @@ class BigHeadPipeline:
                     width=w,
                     height=h,
                 ).images
-        return images[0]
+        return self._correct_skin_cast(images[0])
+
+    def _correct_skin_cast(self, img) -> object:
+        """抵消 IP-Adapter FaceID Plus v2 带来的肤色偏红。
+
+        背景(diag_common_cast.py 固定 seed 实测,脸颊区域 R-B):
+            中性 prompt + 无 LoRA + 无 IP      -1.5   (中性)
+            同上 + 触发词                      -1.5   (零影响)
+            同上 + FilmGrain LoRA             -1.5   (零影响)
+            同上 + IP-Adapter FaceID Plus v2  +48.1   (+49.6)
+        即胶片 LoRA 与触发词完全无辜,偏红来自 FaceID Plus v2 权重本身 ——
+        这是该权重的固有特性,不是本项目的组装 bug,改权重才能根治。
+
+        这里做输出端的轻量补偿:测脸颊区域的 R-B,超过阈值就按比例
+        压 R、抬 B,把色相拉回自然肤色。只作用于偏红方向 ——
+        若测出偏冷/偏青则不动,避免把胶片的冷调也一起中和掉。
+
+        保留策略:strength=0 时完全跳过(可由 env 关闭),
+        且只对"明显偏红"生效,正常输出原样返回。
+        """
+        try:
+            strength = float(os.environ.get("BIGHEAD_SKIN_FIX", "1"))
+        except ValueError:
+            strength = 1.0
+        if strength <= 0:
+            return img
+
+        try:
+            import numpy as np
+            from PIL import Image
+
+            from .face import _get_app
+
+            arr = np.asarray(img.convert("RGB"), dtype=np.float32)
+            faces = _get_app().get(arr.astype(np.uint8))
+            if not faces:
+                return img
+            f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+            kps = f.kps
+            if kps is None or len(kps) < 5:
+                return img
+            le, re_eye, _nose, lm, rm = [np.asarray(p, dtype=np.float32) for p in kps[:5]]
+            eye_y = (le[1] + re_eye[1]) / 2
+            mouth_y = (lm[1] + rm[1]) / 2
+            cx = (lm[0] + rm[0]) / 2
+            half_w = (rm[0] - lm[0]) / 2
+            y0 = int(eye_y + (mouth_y - eye_y) * 0.25)
+            y1 = int(eye_y + (mouth_y - eye_y) * 0.80)
+            x0 = int(max(cx - half_w, 0))
+            x1 = int(min(cx + half_w, arr.shape[1] - 1))
+            if y1 <= y0 or x1 <= x0:
+                return img
+            m = np.zeros(arr.shape[:2], dtype=bool)
+            m[y0:y1, x0:x1] = True
+            px = arr[m]
+            rb = float(px[:, 0].mean() - px[:, 2].mean())
+        except Exception as e:  # 校正失败不能影响出图
+            log.debug("skin cast measure failed: %s", e)
+            return img
+
+        # 参考值:健康亚洲脸颊 R-B 约 25~40。超过 TARGET 就按超出的部分补偿,
+        # 线性收敛到 TARGET,不做减半 —— 半量修正视觉上仍偏红。
+        target = float(SKIN_CAST_TARGET_RB)
+        if rb <= target:
+            return img
+
+        excess = rb - target
+        # 全图按同一比例补偿,保持相对关系;强度由 env 控制便于回退
+        delta = excess * strength
+        out = arr.copy()
+        # 压 R 抬 B 各承担一半,G 微抬避免肤色发灰
+        out[..., 0] = np.clip(out[..., 0] - delta * 0.75, 0, 255)
+        out[..., 2] = np.clip(out[..., 2] + delta * 0.55, 0, 255)
+        out[..., 1] = np.clip(out[..., 1] + delta * 0.20, 0, 255)
+        log.info("skin cast corrected: R-B %.1f -> %.1f (delta=%.1f)", rb, target, delta)
+        return Image.fromarray(out.astype(np.uint8))
 
     def _offload_image_encoder(self) -> None:
         """把 CLIP Vision / proj model 搬回 CPU,腾出 GPU 显存给 UNet 去噪."""

@@ -20,13 +20,30 @@ def _bgr_to_pil(bgr: np.ndarray) -> Image.Image:
 
 
 def _warmth(bgr: np.ndarray, amount: float) -> np.ndarray:
-    """amount > 0 加暖(偏黄),< 0 加冷."""
+    """加暖(amount > 0)/加冷(amount < 0)。
+
+    暖调在 RGB 空间的做法:R 升、**G 同步升**、B 小幅降。
+    G 参与是关键 —— 黄 = R + G,若 G 完全不动,色相会停在 30deg 的纯橙,
+    饱和度被推高(实测 sat 10.2%),人眼就读作"发红"而不是"暖"。
+
+    系数取 (0.5, 0.45, -0.25):同样 warmth=0.18 下
+        旧实现 (1, 0, -1)      -> hue 30deg, sat 10.2%  (偏红)
+        本实现 (0.5,0.45,-0.25)-> hue 56deg, sat  3.9%  (暖黄,且不抢眼)
+    亮度基本不变(val 52.9% -> 51.5%),不会出现"加暖=变亮"。
+
+    参考:HSV 色相 15~45deg 是橙、45~60deg 是黄,都在"暖"的范围里;
+    区别在饱和度 —— 复古要的是低饱和的淡暖,不是高饱和的红。
+    """
     if amount == 0:
         return bgr
     b, g, r = cv2.split(bgr.astype(np.float32))
-    r = np.clip(r + 255 * amount * 0.15, 0, 255)
-    b = np.clip(b - 255 * amount * 0.15, 0, 255)
-    return cv2.merge([b, g, r]).astype(np.uint8)
+    k = 255 * amount * 0.15
+    r = r + k * 0.50
+    g = g + k * 0.45
+    b = b - k * 0.25
+    return cv2.merge([
+        np.clip(b, 0, 255), np.clip(g, 0, 255), np.clip(r, 0, 255)
+    ]).astype(np.uint8)
 
 
 def _fade(bgr: np.ndarray, amount: float) -> np.ndarray:

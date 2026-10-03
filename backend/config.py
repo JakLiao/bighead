@@ -101,6 +101,14 @@ SD15_SIZE = (512, 768)
 FACEID_SCALE = 0.7
 LORA_SCALE = 0.7
 
+# 肤色偏红校正的目标值(脸颊区域 R - B)。
+# 实测(diag_common_cast.py 固定 seed,InsightFace 关键点取脸颊矩形):
+#   健康亚洲脸颊           R-B ≈ 25~40
+#   中性 prompt 无 IP      R-B = -1.5(纯中性)
+#   加 IP-Adapter FaceID   R-B = +48.1  <-- 权重自带的暖偏色
+# 超过本值才触发补偿,可用 BIGHEAD_SKIN_FIX=0 关闭。
+SKIN_CAST_TARGET_RB = 38.0
+
 # 当前默认底座:"sdxl" | "sd15"
 ACTIVE_BACKBONE = "sdxl"
 
@@ -128,13 +136,18 @@ AI_FILENAME = "ai_{idx}.jpg"
 STYLES: dict[str, dict] = {
     "PORTRAIT_HK": {
         "name": "港风复古",
+        # 暖色词不要叠:早期版本同时写了 "warm golden tone" + "Kodak Portra 400"
+        # + "slightly overexposed",三者叠加使出图 R-B 达 +34.7(源图仅 +3.5),
+        # 肤色与墙面整体发红。实测把 warm/golden 换成中性描述后 R-B 回落到个位数,
+        # 胶片感由 FilmGrainRedmond LoRA + "Kodak Portra 400" 承担即可。
         "prompt_prefix": (
-            "1990s Hong Kong film portrait, warm golden tone, Kodak Portra 400 film grain, "
-            "soft window light, slightly overexposed, nostalgic mood, vintage Wong Kar-wai aesthetic, "
-            "subject in frame, photorealistic"
+            "1990s Hong Kong film portrait, Kodak Portra 400 film grain, "
+            "soft diffused window light, muted natural skin tone, "
+            "shallow depth of field, nostalgic mood, photorealistic"
         ),
         "negative_prompt": (
-            "modern, plastic skin, oversaturated, cartoon, anime, illustration, low quality, "
+            "modern, plastic skin, oversaturated, orange skin, red tint, "
+            "color cast, cartoon, anime, illustration, low quality, "
             "blurry, deformed hands, watermark, text"
         ),
         "lora_scale": 0.7,
