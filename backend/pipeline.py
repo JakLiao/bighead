@@ -43,6 +43,30 @@ from . import ws
 log = logging.getLogger("bighead.pipeline")
 
 
+# ----------------------------------------------------------------------
+# AI 生图后端分发
+# ----------------------------------------------------------------------
+# 两条路线共用 generate_one 契约, 上层(generate_async / ws / 前端)完全无感:
+#   sdxl -> BigHeadPipeline  本类, 原有实现一行未改
+#   qwen -> QwenPipeline     独立解释器子进程(diffusers 0.40 与 0.34 无法共存)
+# 切换: 环境变量 BIGHEAD_AI_BACKEND=qwen|sdxl
+_qwen_backend = None
+
+
+def get_qwen_backend():
+    """懒加载 Qwen 后端(单例)。"""
+    global _qwen_backend
+    if _qwen_backend is None:
+        from .qwen_pipeline import qwen_pipeline
+        _qwen_backend = qwen_pipeline
+    return _qwen_backend
+
+
+def is_qwen_backend() -> bool:
+    from .config import AI_BACKEND
+    return AI_BACKEND == "qwen"
+
+
 @dataclass
 class GenerationOutput:
     image_paths: list[str]
@@ -666,6 +690,13 @@ class BigHeadPipeline:
         total = len(frame_paths)
         vram_peak = 0.0
 
+        # Qwen 路线: 收原图而不是裁脸方图。
+        # Qwen-Image-Edit 是整图编辑模型, 保身份靠的是「原图 + 编辑指令」,
+        # SDXL 那套 extract_face 裁成 512x512 正方形反而会丢掉构图,
+        # 也会让 VAE 承担一次额外的 512x768 -> 512x512 重采样。
+        # 上层契约不变(仍然返回 PIL.Image), 只是这里不裁。
+        qwen = is_qwen_backend()
+
         for i, fp in enumerate(frame_paths):
             try:
                 await ws.broadcast(job_id, {"status": "running", "current": i, "total": total, "msg": f"生成第 {i+1}/{total} 张"})
@@ -677,6 +708,16 @@ class BigHeadPipeline:
                 def _work(fp: str = fp, i: int = i) -> "Image.Image":
                     pil = Image.open(fp)
                     pil.load()
+
+                    if qwen:
+                        # 原图直接给, 不做裁脸也不在此处缩放 ——
+                        # 缩放由 worker 统一按 QWEN_SIZE 做(它才知道目标尺寸,
+                        # 且需要用 LANCZOS 保脸部锐度)。这里提前缩会让
+                        # 1280x720 -> 1280 -> 512x768 多一次无谓重采样。
+                        return get_qwen_backend().generate_one(
+                            pil.convert("RGB"), style_cfg, steps=steps,
+                        )
+
                     fr = extract_face(pil)
                     if fr.no_face:
                         # 检不到脸时保持原比例缩放,不能拉伸成正方形(会严重变形)
@@ -698,7 +739,12 @@ class BigHeadPipeline:
                 img.convert("RGB").save(out_path, quality=92)
                 out_paths.append(str(out_path))
 
-                peak_gb = torch.cuda.max_memory_allocated() / 1e9
+                if qwen:
+                    # Qwen 跑在子进程里, 父进程拿不到 torch.cuda 统计量,
+                    # 直接用 worker 回传的峰值(get_qwen_backend().last_peak_gb)。
+                    peak_gb = get_qwen_backend().last_peak_gb
+                else:
+                    peak_gb = torch.cuda.max_memory_allocated() / 1e9
                 vram_peak = max(vram_peak, peak_gb)
                 log.info("[%s] generated %s, vram peak=%.2fGB", job_id, out_path.name, peak_gb)
             except Exception as e:

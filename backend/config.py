@@ -79,6 +79,39 @@ SD15_FILM_LORA = VELVIA_LORA
 # InsightFace
 INSIGHTFACE_ROOT = MODEL_BASE / "insightface"
 
+# ----------------------------------------------------------------------------
+# Qwen-Image-Edit-2511 路线(替换 SDXL + FaceID 的新后端)
+# ----------------------------------------------------------------------------
+# 换它的唯一理由: 身份保真是架构级的(image-to-image 编辑),
+# 而 SDXL + IP-Adapter FaceID 实测只能锁住骨骼骨架, 性别/年龄/发型
+# 会被底模先验带走 —— 就是"产出和拍照的人完全不对"的根因。
+QWEN_MODEL_DIR = MODEL_BASE / "qwen"
+QWEN_TRANSFORMER = QWEN_MODEL_DIR / "transformer" / "qwen-image-edit-2511-Q3_K_M.gguf"
+QWEN_VAE_DIR = QWEN_MODEL_DIR / "vae"
+QWEN_TEXT_ENCODER_DIR = QWEN_MODEL_DIR / "text_encoder"
+QWEN_PROCESSOR_DIR = QWEN_MODEL_DIR / "processor"
+QWEN_SCHEDULER_DIR = QWEN_MODEL_DIR / "scheduler"
+QWEN_LORA_KOHYA = (
+    QWEN_MODEL_DIR / "lora" / "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
+)
+# 转换后的 PEFT 命名版本(由 qwen_pipeline 自动生成并缓存)。
+# lightx2v 的 LoRA 是 Kohya 命名(lora_down/lora_up/alpha), diffusers 只认
+# PEFT 的 lora_A/lora_B, 必须转换 —— 详见 qwen_pipeline.convert_lora_to_peft。
+QWEN_LORA_PEFT = OUTPUT_DIR / "_cache" / "qwen_lightning4_peft.safetensors"
+
+# 运行参数(全部来自实测,见 docs/superpowers/plans/2026-10-03-qwen-image-edit-migration.md)
+#   4 步 + CFG 1.0 是 Lightning 蒸馏的配对用法: 蒸馏已把引导信号烧进
+#   步数里, CFG>1 反而会"烧焦"(极高对比/阴影死黑)。CFG=1.0 同时让 pipeline
+#   跳过双批分支(每步只跑一次 transformer, 而非 cond+uncond 两次)。
+QWEN_STEPS = 4
+QWEN_CFG = 1.0
+QWEN_SIZE = (512, 768)  # 宽 × 高, 与 SDXL_SIZE 一致, 前端零改动
+# Q3_K_M 而非 Q4_K_M: Q4 实测峰值 16.81G 已超过物理显存 15.89G,
+# 再挂 720 个 LoRA 层必然溢出 -> WDDM 换页 -> 647s/张(实测)。
+# Q3 把峰值压到 14.61G, 同样挂 LoRA 只要 26.0s/张。
+# 身份余弦代价很小: 0.9082(Q4 裸跑) -> 0.8967(Q3+LoRA)。
+QWEN_LORA_ENABLED = os.environ.get("BIGHEAD_QWEN_LORA", "1") not in ("0", "false", "False")
+
 # 备用 SD1.5 路线(可切换)
 # 实际文件名带 _V5.0 后缀,且位于 checkpoints/ 而非 Stable-diffusion/,
 # 这里直接按现有 checkpoints 目录解析,避免手写路径再次失配。
@@ -112,6 +145,31 @@ SKIN_CAST_TARGET_RB = 38.0
 # 当前默认底座:"sdxl" | "sd15"
 ACTIVE_BACKBONE = "sdxl"
 
+# ----------------------------------------------------------------------------
+# AI 生图后端选择:"qwen" | "sdxl"
+# ----------------------------------------------------------------------------
+# 为什么需要这个开关(实测结论, 不是设计冗余):
+#   Qwen-Image-Edit 链路要求 diffusers>=0.40 + transformers>=5.18,
+#   而本服务跑在 webui 的 .venv 里(diffusers 0.34.0 / transformers 4.37.2),
+#   两者**无法共存于同一进程** —— diffusers 0.40 要 huggingface-hub>=1.23,<2,
+#   而 transformers 4.37~4.57 全部要求 huggingface-hub<1.0,区间不相交。
+#   所以 Qwen 跑在独立解释器 .venv-qwen 里, 由 backend/qwen_pipeline.py
+#   以常驻子进程的方式托管, 走文件协议通信。
+#
+# 切换方式: 环境变量 BIGHEAD_AI_BACKEND=qwen|sdxl (默认 sdxl, 保证回退安全)
+AI_BACKEND = os.environ.get("BIGHEAD_AI_BACKEND", "sdxl").strip().lower()
+if AI_BACKEND not in ("qwen", "sdxl"):
+    raise ValueError(f"BIGHEAD_AI_BACKEND 只能是 qwen 或 sdxl, 收到 {AI_BACKEND!r}")
+
+# Qwen 子进程用的解释器(必须是装了 diffusers 0.40 / transformers 5.x 的那个)
+QWEN_PYTHON = Path(
+    os.environ.get(
+        "BIGHEAD_QWEN_PYTHON",
+        str(PROJECT_ROOT / ".venv-qwen" / "Scripts" / "python.exe"),
+    )
+)
+QWEN_WORKER = PROJECT_ROOT / "backend" / "qwen_worker.py"
+
 # SD1.5 路线已停用。
 # 原因(实测结论,非代码缺陷):本机 ip-adapter-faceid-plusv2_sd15.bin 与
 # realisticVision V5.0 底模组合后,出图身份正确但高频细节被严重抹平。
@@ -133,13 +191,26 @@ AI_FILENAME = "ai_{idx}.jpg"
 # ----------------------------------------------------------------------------
 # 风格预设(AI 写真提示词)
 # ----------------------------------------------------------------------------
+# 两套后端共用同一个 STYLES 字典, 但 prompt 语义完全不同:
+#   sdxl 后端 -> prompt_prefix 是「文生图描述」(画一张什么样的照片)
+#   qwen 后端 -> prompt_prefix 是「编辑指令」(把这张照片改成什么样)
+# 下面每个风格同时给出两者, 由 qwen_pipeline / pipeline 各自取用。
+# 关键差异: Qwen 是 image-to-image 编辑模型, 身份保真是架构级的;
+# 指令里必须显式写「保持身份/五官不变」, 否则 4 步蒸馏容易顺手把脸也改了。
 STYLES: dict[str, dict] = {
     "PORTRAIT_HK": {
         "name": "港风复古",
-        # 暖色词不要叠:早期版本同时写了 "warm golden tone" + "Kodak Portra 400"
-        # + "slightly overexposed",三者叠加使出图 R-B 达 +34.7(源图仅 +3.5),
-        # 肤色与墙面整体发红。实测把 warm/golden 换成中性描述后 R-B 回落到个位数,
-        # 胶片感由 FilmGrainRedmond LoRA + "Kodak Portra 400" 承担即可。
+        # 身份优先(实测后的定稿版)。这里刻意**不**写「严格的身份约束」这类
+        # 强调句: Qwen 的 system prompt 本身就要求 "maintaining consistency
+        # with the original input", 指令里再叠加强调并不会提高保真度,
+        # 反而把权重从风格描述上挪走。实测「加强约束」对身份无增益
+        # (见文档 4/8/12 步与 A/B 实验), 所以保持一句轻约束即可。
+        # 风格强度也刻意收着 —— 实测强风格化会明显改脸型。
+        "qwen_prompt": (
+            "把照片调成 1990 年代香港电影剧照的色调: 整体偏暖的胶片色, "
+            "轻微褪色发灰, 柔和的窗光。保留原图的人物和构图, 不要改动五官和脸型。"
+        ),
+        # SDXL 路线(保留以便回退对照)
         "prompt_prefix": (
             "1990s Hong Kong film portrait, Kodak Portra 400 film grain, "
             "soft diffused window light, muted natural skin tone, "
@@ -155,6 +226,17 @@ STYLES: dict[str, dict] = {
     },
     "FILM_VELVIA": {
         "name": "胶片 VELVIA",
+        # Velvia 的问题是它本身色彩冲击很强(高饱和是它的招牌), 稍一过头
+        # 就会连肤色一起过饱和, 反而让人脸变形。所以措辞上把强度压下来,
+        # 并且**用正向描述代替负向词** —— Qwen 路线 CFG=1.0 时
+        # do_true_cfg 分支不成立, negative_prompt 根本不参与计算
+        # (见 qwen_worker.do_gen 注释), 「不要发红」这类负向词只会被
+        # 正文 encoder 当成语义特征吃掉。
+        "qwen_prompt": (
+            "把照片调成富士 Velvia 50 反转片的色彩: 稍微提高饱和度, "
+            "通透的暖调, 肤色自然。保留原图的人物和构图, 不要改动五官和脸型。"
+        ),
+        # SDXL 路线
         "prompt_prefix": (
             "Fujifilm Velvia 50 film photography, vivid color slide film, deep contrast, "
             "rich saturation, soft natural light, outdoor portrait, classic film look, photorealistic"
@@ -167,6 +249,17 @@ STYLES: dict[str, dict] = {
     },
     "SHOWA_ANIME": {
         "name": "昭和复古动漫",
+        # 四个风格里身份代价最高的: 写实 -> 赛璐璐是最大的风格跳跃。
+        # 修复纵横拉伸后实测余弦从 0.20 升到 0.46 —— 比三个写实风格低,
+        # 但目视身份是保留的(眼镜/发型/脸型都在), 0.46 主要反映
+        # 「赛璐璐画法」与「写实人脸」在 embedding 空间的固有距离,
+        # 不等于认不出人。保持完整转绘, 只要求保留五官特征。
+        "qwen_prompt": (
+            "把照片转绘成 1980 年代日本动漫的赛璐璐上色风格: 平涂色块、"
+            "清晰干净的线条、柔和的暖调配色。把背景换成干净的纯色背景, "
+            "保留原图人物的脸型、五官特征、发型和眼镜等配饰。"
+        ),
+        # SDXL 路线
         "prompt_prefix": (
             "1980s Showa era anime style portrait, soft cel shading, vintage anime film grain, "
             "warm pastel palette, nostalgic, studio Ghibli-esque, character portrait"
@@ -179,6 +272,16 @@ STYLES: dict[str, dict] = {
     },
     "DARKROOM_STICKER": {
         "name": "真·大头贴机",
+        # 实测这个风格的身份保持最好(余弦 0.89, 全场最高) —— 因为它本质
+        # 是「换背景 + 换光线」, 不重绘五官。原指令里「保留原图构图」与
+        # 「纯白背景」自相矛盾(换背景就换了构图), 模型会在这两条间摇摆,
+        # 已拆开: 构图保留的是主体位置与姿态, 背景交给纯白。
+        "qwen_prompt": (
+            "把照片处理成 1990 年代大头贴机拍出来的贴纸照: 换成纯白无缝背景, "
+            "正面硬闪光直打, 色彩略微冲淡, 有轻微的相纸颗粒感。"
+            "保留原图的人脸和构图, 不要改动五官。"
+        ),
+        # SDXL 路线
         "prompt_prefix": (
             "vintage 90s photobooth photo, hard flash lighting, white seamless background, "
             "slightly washed out colors, photo sticker style, candid fun expression, photorealistic"

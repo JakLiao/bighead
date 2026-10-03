@@ -42,6 +42,8 @@ app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 async def _startup():
     import torch
 
+    from .config import AI_BACKEND
+
     print("=" * 60)
     print("  BigHead · 大头贴复古  v0.1.0")
     print("=" * 60)
@@ -52,8 +54,19 @@ async def _startup():
         print(f"  Compute Capability: {torch.cuda.get_device_capability(0)}")
     else:
         print("  WARNING: CUDA not available, AI will not work")
+    print(f"  AI backend: {AI_BACKEND}")
     print(f"  Output dir: {OUTPUT_DIR}")
     print("=" * 60)
+
+    if AI_BACKEND == "qwen":
+        # Qwen 必须提前预热: 模型加载 75s + 首次 CUDA kernel 懒加载 145s
+        # ≈ 3.5 分钟。不预热的话第一个用户请求要独吞这份开销, 表现为
+        # "点了没反应"。这里放后台线程, 服务立即可用, 生成请求会等它完成。
+        from .qwen_pipeline import qwen_pipeline
+
+        qwen_pipeline.prewarm()
+        print("  Qwen 后端后台预热中(约 3.5 分钟), 期间生成请求会自动等待...")
+        print("=" * 60)
 
 
 if __name__ == "__main__":

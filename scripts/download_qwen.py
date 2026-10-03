@@ -49,6 +49,20 @@ REPO = "Qwen/Qwen-Image-Edit-2511"
 
 ITEMS = [
     (
+        "lora",
+        "lightx2v/Qwen-Image-Edit-2511-Lightning",
+        "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors",
+        None,   # 魔塔 HEAD 不返回 Content-Length, 靠 Content-Range 拿真值
+        "Lightning 4 步蒸馏 LoRA(40 步 -> 4 步, 社区标准加速方案)",
+    ),
+    (
+        "transformer",
+        "unsloth/Qwen-Image-Edit-2511-GGUF",
+        "qwen-image-edit-2511-Q3_K_M.gguf",
+        None,
+        "Q3_K_M 9.24GB —— 挂 LoRA 时用, 比 Q4_K_M 腾出 3.1GB 显存余量",
+    ),
+    (
         "transformer",
         "unsloth/Qwen-Image-Edit-2511-GGUF",
         "qwen-image-edit-2511-Q4_K_M.gguf",

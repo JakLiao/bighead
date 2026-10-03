@@ -1,5 +1,8 @@
 # 输出产物
 outputs/
+# 一次性诊断/基准脚本的输出日志(含本机绝对路径与大量冗余 stdout, 不入库;
+# 结论已整理进 docs/superpowers/plans/2026-10-03-qwen-image-edit-migration.md)
+*.log
 __pycache__/
 *.pyc
 *.pyo
