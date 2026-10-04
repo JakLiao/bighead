@@ -1,10 +1,36 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "../store";
-import { applyFilter, fetchMeta, makeLayout, saveCaptures, startGeneration, openJobSocket } from "../api";
+import {
+  applyFilter,
+  fetchJob,
+  fetchMeta,
+  makeLayout,
+  saveCaptures,
+  startGeneration,
+  openJobSocket,
+} from "../api";
 import type { FilterInfo, FrameInfo, LayoutInfo, StyleInfo } from "../types";
 
+/** 拼图最多用几张(与 HomePage 的连拍张数一致)。 */
+const PHOTO_COUNT_FOR_LAYOUT = 4;
+
+/**
+ * dataURL -> Blob。
+ *
+ * 不用 fetch(dataUrl): 那要先把整条 base64 字符串解出来, 4 张 1280x960 的
+ * dataURL 会让峰值内存 = base64 字符串 + 解码 Blob 双份。atob 直接拿字节,
+ * 少一次拷贝与一份完整副本。
+ */
 function dataUrlToBlob(url: string): Promise<Blob> {
-  return fetch(url).then((r) => r.blob());
+  const comma = url.indexOf(",");
+  if (comma < 0) return Promise.reject(new Error("非法 dataURL"));
+  const head = url.slice(0, comma);
+  const b64 = url.slice(comma + 1);
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const mime = /data:([^;,]+)/.exec(head)?.[1] ?? "image/jpeg";
+  return Promise.resolve(new Blob([bytes], { type: mime }));
 }
 
 export function DecoratePage() {
@@ -13,8 +39,6 @@ export function DecoratePage() {
   const setFilter = useStore((s) => s.setFilter);
   const layout = useStore((s) => s.layout);
   const setLayout = useStore((s) => s.setLayout);
-  const frame = useStore((s) => s.frame);
-  const setFrame = useStore((s) => s.setFrame);
   const style = useStore((s) => s.style);
   const setStyle = useStore((s) => s.setStyle);
   const aiEnabled = useStore((s) => s.aiEnabled);
@@ -23,9 +47,19 @@ export function DecoratePage() {
   const setAiImages = useStore((s) => s.setAiImages);
   const layoutUrl = useStore((s) => s.layoutUrl);
   const setLayoutUrl = useStore((s) => s.setLayoutUrl);
-  const maskPreview = useStore((s) => s.maskPreview);
+  // 下载文件名。刻意不自定义: 服务端 layout.jpg 的路径里已含唯一的 job_id
+  // (/outputs/<job_id>/ai/<style>/layout.jpg), 浏览器会自动取它做文件名。
+  // 之前写的是 `bighead_${Date.now()}.jpg` —— 那是渲染期的 impure 调用,
+  // 每次重渲染都会得到不同值(react-hooks/purity 会拦), 且语义不对。
+  // 注意: 不再订阅 maskPreview。是否补滤镜改由每帧的 burnedIn 决定 ——
+  // 拿取景页的实时开关当「是否已烧录」会在拍照后改开关时漂移。
   const setCurrentJobId = useStore((s) => s.setCurrentJobId);
   const currentJobId = useStore((s) => s.currentJobId);
+  // HomePage 拉 /api/meta 时缓存了这两份, 本页直接复用避免重复请求。
+  const filterMeta = useStore((s) => s.filterMeta);
+  const frameMeta = useStore((s) => s.frameMeta);
+  const cachedFilters = useMemo(() => Object.values(filterMeta), [filterMeta]);
+  const cachedFrames = useMemo(() => Object.values(frameMeta), [frameMeta]);
 
   const [meta, setMeta] = useState<{
     styles: StyleInfo[]; filters: FilterInfo[]; frames: FrameInfo[]; layouts: LayoutInfo[];
@@ -37,31 +71,152 @@ export function DecoratePage() {
   // 相框已在取景阶段烧进照片。本页的"相框"选择改为「额外再套一层」,
   // 默认 none,即保持所见即所得的结果不变。想换框请回取景页重拍。
   const [frameOverride, setFrameOverride] = useState<string | null>(null);
-  // 是否需要后端补滤镜:取景已用 CSS 滤镜烧了一份,后端再跑一遍会二次调色。
-  // 因此仅当用户在本页换了滤镜,或相框被烧录时才需要重跑。
-  const burnedIn = maskPreview;
+  // AI 生成完成后要拼的图。AI 分支拿到的 URL 是 /outputs 下的服务端路径,
+  // 拼图接口要的是二进制, 所以在内存里按需抓成 Blob。
+  // 抓完直接喂给 makeLayout, 不需要跨渲染保留 —— 用局部变量即可。
 
+  // /api/meta 是纯静态配置, HomePage 已经拉到并缓存了 filters/frames。
+    // 原来本页无条件再 fetch 一次全量 meta(store.ts 注释里声称的「缓存在
+    // store 避免重复请求」其实没落地)。这里改成: store 里已有的部分直接复用,
+    // 只为缺失的 styles/layouts 拉一次 —— 并且拉到的结果并回 store。
   useEffect(() => {
-    fetchMeta().then(setMeta).catch(() => {});
+    let alive = true;
+    const hasFilter = cachedFilters.length > 0;
+    const hasFrame = cachedFrames.length > 0;
+    if (hasFilter && hasFrame && meta.styles.length > 0) return;
+
+    fetchMeta()
+      .then((m) => {
+        if (!alive) return;
+        setMeta({
+          styles: m.styles,
+          filters: hasFilter ? cachedFilters : m.filters,
+          frames: hasFrame ? cachedFrames : m.frames,
+          layouts: m.layouts,
+        });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [cachedFilters, cachedFrames, meta.styles.length]);
+
+  // 卸载时释放拼图 Blob 的 objectURL。effect 闭包只捕获挂载那一刻的
+  // layoutUrl, 而它每次生成后都会变 —— 用 ref 读最新值, 否则只能清掉首帧。
+  // 注意 ref 的写入放在 effect 里而不是渲染期: 渲染期写 ref 在并发模式下不安全。
+  const layoutUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    layoutUrlRef.current = layoutUrl;
+  }, [layoutUrl]);
+  useEffect(() => {
+    return () => {
+      if (layoutUrlRef.current) URL.revokeObjectURL(layoutUrlRef.current);
+    };
   }, []);
 
-  // WS 监听
+  // 用 AI 结果出拼图。首选后端已经拼好的 layout_url(服务端在写 job 状态时
+  // 就生成好了, 存在 outputs 下), 省掉「把 4 张图再下载一遍、再上传一遍」;
+  // 后端拼图失败(layout_url 为 null)时才退回客户端拼。
+  // 用 AI 结果出拼图。首选后端已经拼好的 layout_url(服务端在写 job 状态时
+  // 就生成好了, 存在 outputs 下), 省掉「把 4 张图再下载一遍、再上传一遍」;
+  // 后端拼图失败(layout_url 为 null)时才退回客户端拼。
+  //
+  // 定义成 useCallback 并只依赖它真正用到的 state, 这样 WS 订阅 effect 的
+  // 依赖数组能保持稳定 —— 否则每次 render 都是新函数, 会反复重建 WS 连接。
+  const layoutFromAiImages = useCallback(async (urls: string[], serverLayout?: string | null) => {
+    const prev = layoutUrlRef.current;
+    try {
+      if (serverLayout) {
+        if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        setLayoutUrl(serverLayout);
+        return;
+      }
+      const picked = urls.slice(0, PHOTO_COUNT_FOR_LAYOUT);
+      const blobs = await Promise.all(
+        picked.map(async (u) => {
+          const r = await fetch(u);
+          if (!r.ok) throw new Error(`拉取 AI 结果失败 ${r.status}`);
+          return r.blob();
+        })
+      );
+      const result = await makeLayout(blobs, layout, frameOverride ?? "none");
+      if (prev) URL.revokeObjectURL(prev);
+      setLayoutUrl(URL.createObjectURL(result));
+    } catch (e: any) {
+      setError(e.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [layout, frameOverride, setLayoutUrl]);
+
+  // WS 监听。用 fetchJob 轮询兜底: WS 可能在生成途中因网络/代理/后端重启
+  // 断开, 而 openJobSocket 只挂了 onmessage —— 没有 onerror/onclose 时
+  // busy 永远为 true, 按钮永久禁用, 且 progress.total 为 0 连进度条都不显示,
+  // 用户得不到任何提示。轮询保证终态一定能落地。
   useEffect(() => {
     if (!currentJobId) return;
-    const ws = openJobSocket(currentJobId, (msg) => {
+    let stopped = false;
+    let pollTimer: number | undefined;
+
+    const finish = () => {
+      if (!stopped) setBusy(false);
+    };
+    const onMessage = (msg: any) => {
       if (msg.status === "running") {
         setProgress({ current: msg.current, total: msg.total, msg: msg.msg ?? "" });
       } else if (msg.status === "done") {
         setProgress({ current: msg.total, total: msg.total, msg: "完成" });
         setAiImages(msg.images ?? []);
-        setBusy(false);
+        finish();
+        // AI 分支也要出拼图: 之前这里直接结束, 拼图区域永不出现。
+        if (msg.images?.length) void layoutFromAiImages(msg.images, msg.layout_url);
       } else if (msg.status === "error") {
         setError(msg.msg ?? "未知错误");
-        setBusy(false);
+        finish();
       }
+    };
+
+    const ws = openJobSocket(currentJobId, onMessage, () => {
+      // WS 断了。轮询已在跑, 这里只提示一句, 避免页面静默卡住。
+      if (!stopped) setError("进度连接中断, 正在改用轮询获取结果…");
     });
-    return () => ws.close();
-  }, [currentJobId, setAiImages]);
+
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const job = await fetchJob(currentJobId);
+        if (stopped) return;
+        // 轮询能拿到状态就说明链路是通的, 撤掉 WS 断线的提示。
+        setError((e) => (e?.startsWith("进度连接中断") ? null : e));
+        if (job.status === "done") {
+          setProgress({ current: job.total, total: job.total, msg: "完成" });
+          const imgs = job.images ?? [];
+          setAiImages(imgs);
+          finish();
+          if (imgs.length) void layoutFromAiImages(imgs, job.layout_url);
+          return; // 终态, 停轮询
+        }
+        if (job.status === "error") {
+          setError(job.msg ?? "未知错误");
+          finish();
+          return;
+        }
+        if (job.status === "running") {
+          setProgress({ current: job.current, total: job.total, msg: job.msg ?? "" });
+        }
+      } catch {
+        // 后端暂时不可达, 下一轮再试; 连不上超过阈值由 WS 的 onerror 提示。
+      }
+      if (!stopped) pollTimer = window.setTimeout(tick, 3000);
+    };
+    pollTimer = window.setTimeout(tick, 3000);
+
+    return () => {
+      stopped = true;
+      if (pollTimer) window.clearTimeout(pollTimer);
+      ws.close();
+    };
+  }, [currentJobId, setAiImages, layoutFromAiImages]);
 
   if (frames.length === 0) {
     return (
@@ -75,26 +230,34 @@ export function DecoratePage() {
     setError(null);
     setBusy(true);
     try {
-      let blobs = await Promise.all(frames.map(dataUrlToBlob));
-
-      // 取景阶段已把相框/滤镜烧进照片(所见即所得),所以这里不能再套一层框。
-      // 但滤镜仍需要后端 OpenCV 补 grain/vignette —— CSS 滤镜表达不了噪点,
-      // 且后端算子才是最终质量基准。所以:滤镜照跑,相框只在用户于本页重新
-      // 选了相框时才由后端补画(见下方 frameOverride)。
-      if (!burnedIn) {
-        blobs = await Promise.all(blobs.map((b) => applyFilter(b, filter)));
-      }
+      // 逐帧决定是否补滤镜: burnedIn 是**拍照那一刻**的快照。
+      // 只要有任何一帧没烧(用户在连拍中途关掉了取景预览),就必须让后端补,
+      // 否则那几帧会静默丢掉 grain/vignette。也不能读当前 maskPreview ——
+      // 那是取景页的实时开关,拍照之后再改它不该影响已成片的结果。
+      const blobs = await Promise.all(
+        frames.map((f) => dataUrlToBlob(f.url))
+      );
+      const needFilter = frames.some((f) => !f.burnedIn);
+      const finalBlobs = needFilter
+        ? await Promise.all(blobs.map((b) => applyFilter(b, filter)))
+        : blobs;
 
       // AI 写真
       if (useAi) {
-        const cap = await saveCaptures(blobs);
-        setCurrentJobId(cap.job_id);
+        const cap = await saveCaptures(finalBlobs);
+        // 先发起生成再订阅: 反过来(先 setCurrentJobId 再 await start)的话,
+        // 后端可能在 WS 建连前就 broadcast 了 done, 那条消息永久丢失,
+        // busy 永远为 true。
         await startGeneration(cap.job_id, style);
+        setCurrentJobId(cap.job_id);
         return; // 等待 WS
       }
 
       // 普通拼图
-      const result = await makeLayout(blobs, layout, frameOverride ?? "none");
+      const result = await makeLayout(finalBlobs, layout, frameOverride ?? "none");
+      // 释放上一个 objectURL 再换新的: 拼图是数 MB 的 Blob, 不 revoke
+      // 的话每次点「生成拼图」都泄漏一份(旧 URL 永不释放)。
+      if (layoutUrl) URL.revokeObjectURL(layoutUrl);
       setLayoutUrl(URL.createObjectURL(result));
       setBusy(false);
     } catch (e: any) {
@@ -103,7 +266,8 @@ export function DecoratePage() {
     }
   }
 
-  const displayImages = aiEnabled && aiImages.length > 0 ? aiImages : frames;
+  const displayImages: string[] =
+    aiEnabled && aiImages.length > 0 ? aiImages : frames.map((f) => f.url);
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-6">
@@ -243,7 +407,10 @@ export function DecoratePage() {
             {displayImages.slice(0, 8).map((src, i) => (
               <div key={i} className="aspect-[3/4] bg-white rounded-lg border-2 border-pink overflow-hidden">
                 <img
-                  src={src.startsWith("/") ? src : src}
+                  src={src}
+                  alt=""
+                  loading="lazy"
+                  decoding="async"
                   className="w-full h-full object-cover"
                 />
               </div>
@@ -256,7 +423,6 @@ export function DecoratePage() {
                 <div className="font-pixel text-sm text-brick">最终拼图</div>
                 <a
                   href={layoutUrl}
-                  download={`bighead_${Date.now()}.jpg`}
                   className="px-4 py-1.5 bg-brick text-white rounded-full text-xs"
                 >
                   下载 JPG

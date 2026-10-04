@@ -76,9 +76,12 @@ export function manifestError(): string | null {
   return lastError;
 }
 
+/** 未加载时的降级空表。用模块级常量保证引用稳定, 避免每次调用都产出新对象。 */
+const EMPTY_MANIFEST: MaskManifest = { version: 1, masks: [] };
+
 /** 同步读取已加载的 manifest;未加载时返回空表(供渲染期安全降级)。 */
 export function getLoadedManifest(): MaskManifest {
-  return manifestCache ?? { version: 1, masks: [] };
+  return manifestCache ?? EMPTY_MANIFEST;
 }
 
 /** 把 manifest 条目转成 ImageMaskDef。src 补全为绝对地址。 */
@@ -95,9 +98,27 @@ function toImageMask(e: ManifestEntry): ImageMaskDef {
   };
 }
 
-/** 已加载的位图蒙版表。 */
+/**
+ * 已加载的位图蒙版表(带引用缓存)。
+ *
+ * 为什么必须缓存: 之前每次调用都 `.map(toImageMask)` 重建数组和全部对象,
+ * 于是 `getMask()` 对图库蒙版每次都返回**全新对象**。而 LiveCamera 在渲染体
+ * 里调 getMask() 并把结果放进 useEffect 依赖, 引用一变 effect 就重跑 ——
+ * 里面是 2x DPR 全画布 renderMaskLayer + toDataURL("image/png") 同步编码。
+ * 连拍期间每次倒计时 tick 都会触发一轮, 主线程被多 MB 级 PNG 编码占满。
+ *
+ * 缓存以 manifest 对象为 key, manifest 加载/替换时自动失效。
+ */
+let _imageMasksCache: ImageMaskDef[] = [];
+let _imageMasksSource: MaskManifest | null = null;
+
 export function getImageMasks(): ImageMaskDef[] {
-  return getLoadedManifest().masks.map(toImageMask);
+  const m = getLoadedManifest();
+  if (_imageMasksSource !== m) {
+    _imageMasksSource = m;
+    _imageMasksCache = m.masks.map(toImageMask);
+  }
+  return _imageMasksCache;
 }
 
 /**
@@ -151,12 +172,22 @@ export function filterMasks(list: MaskSummary[], query: string, category: string
  * 预览与出片都需要同步拿到已解码的图像,所以这里维护一份 Promise 缓存:
  * 同一张图并发调用只会真正加载一次。加载失败返回 null,
  * 调用方据此跳过绘制(而不是抛错中断拍照流程)。
+ *
+ * 缓存的是**已解码的位图**(宽x高x4 字节常驻), 逐个浏览蒙版会无上限增长,
+ * 所以按 LRU 淘汰: Map 的插入顺序即访问顺序, 超限时删最早的。
+ * 上限 40 张 —— 足够覆盖一次完整浏览, 又不会让常驻内存失控。
  */
+const MAX_IMAGE_CACHE = 40;
 const imageCache = new Map<string, Promise<HTMLImageElement | null>>();
 
 export function loadMaskImage(src: string): Promise<HTMLImageElement | null> {
   const hit = imageCache.get(src);
-  if (hit) return hit;
+  if (hit) {
+    // 命中时重新插入,把它挪到队尾(= 最近使用)。
+    imageCache.delete(src);
+    imageCache.set(src, hit);
+    return hit;
+  }
 
   const p = new Promise<HTMLImageElement | null>((resolve) => {
     const img = new Image();
@@ -169,5 +200,11 @@ export function loadMaskImage(src: string): Promise<HTMLImageElement | null> {
     img.src = src;
   });
   imageCache.set(src, p);
+  while (imageCache.size > MAX_IMAGE_CACHE) {
+    // Map 迭代顺序即插入顺序, 第一个就是最久未用的。
+    const oldest = imageCache.keys().next().value;
+    if (oldest === undefined) break;
+    imageCache.delete(oldest);
+  }
   return p;
 }

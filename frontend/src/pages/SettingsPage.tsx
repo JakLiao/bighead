@@ -3,9 +3,22 @@ import { fetchHealth } from "../api";
 
 export function SettingsPage() {
   const [health, setHealth] = useState<{ ok: boolean; gpu: string; vram_free_gb: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchHealth().then(setHealth);
+    let alive = true;
+    // 补 catch: 后端不可达时 fetchHealth 抛异常, health 永远为 null,
+    // 页面会一直停在「加载中...」而不给任何提示。
+    fetchHealth()
+      .then((h) => {
+        if (alive) setHealth(h);
+      })
+      .catch((e) => {
+        if (alive) setError(e.message ?? String(e));
+      });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   return (
@@ -27,6 +40,8 @@ export function SettingsPage() {
             <dt className="text-brown/70">显存预算(AI)</dt>
             <dd className="font-mono-retro text-base">≤ 7 GB</dd>
           </dl>
+        ) : error ? (
+          <div className="text-red-500 text-sm">后端连接失败：{error}</div>
         ) : (
           <div className="text-brown/60 text-sm">加载中...</div>
         )}

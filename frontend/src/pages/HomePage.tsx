@@ -14,10 +14,18 @@ import type { FilterInfo, FrameInfo } from "../types";
 
 const PHOTO_COUNT = 4;
 
+/**
+ * 稳定引用占位。LiveCamera 包了 memo, 若这里传内联箭头函数, 每次渲染都是
+ * 新引用, 浅比较直接失败 —— memo 白包。取景实际走 camRef.snap(), 这个
+ * 回调本就没内容。
+ */
+const noop = () => {};
+
 export function HomePage() {
   const nav = useNavigate();
   const frames = useStore((s) => s.frames);
   const setFrames = useStore((s) => s.setFrames);
+  const reset = useStore((s) => s.reset);
   const filter = useStore((s) => s.filter);
   const setFilter = useStore((s) => s.setFilter);
   const frame = useStore((s) => s.frame);
@@ -47,16 +55,29 @@ export function HomePage() {
   // 图库里的蒙版数量(不含内置 15 个),用于入口角标。
   // 先把 manifest 拉到内存里,这样点开抽屉是即时的,不用等网络。
   const [galleryCount, setGalleryCount] = useState(0);
+  // 摄像头检不到帧时的连续重试次数。与已拍张数是两个独立语义。
+  // 用 ref: 只在 doSnap 内做判断, 不参与渲染。
+  const retryRef = useRef(0);
 
-  useEffect(() => {
-    loadMaskManifest().then(() => setGalleryCount(getImageMasks().length));
-  }, []);
   // 摄像头拍照能力。通过 ref 显式取用,而不是去读组件的静态属性。
   const camRef = useRef<LiveCameraHandle>(null);
+  // doSnap 里的 setTimeout 收集在这里, 卸载时统一清理。
+  // 不清理的话, 拍完第 4 张的 400ms 窗口内用户若点了别的页面,
+  // 定时器照常触发 nav("/decorate") 把人强行拽走。
+  const timers = useRef<number[]>([]);
+  useEffect(() => {
+    const ids = timers.current;
+    return () => {
+      ids.forEach((id) => window.clearTimeout(id));
+      ids.length = 0;
+    };
+  }, []);
 
   useEffect(() => {
+    let alive = true;
     fetchMeta()
       .then((m) => {
+        if (!alive) return;
         setFilters(m.filters);
         setFrameList(m.frames);
         // 缓存完整参数到 store,snap() 出片时要读 filter.css 与 frame.pad
@@ -64,12 +85,34 @@ export function HomePage() {
         setFrameMeta(m.frames);
       })
       .catch(() => {});
+    return () => {
+      alive = false;
+    };
   }, [setFilterMeta, setFrameMeta]);
+
+  useEffect(() => {
+    let alive = true;
+    loadMaskManifest()
+      .then(() => {
+        if (alive) setGalleryCount(getImageMasks().length);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   // 全局键盘:空格 = 拍照
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === "Space" && !capturing) {
+      if (e.code !== "Space") return;
+      // 焦点在输入框时,空格是正常输入(比如图库抽屉的搜索框「珍珠 贴纸」),
+      // 不能吞掉它更不能触发连拍。
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
+        return;
+      }
+      if (!capturing) {
         e.preventDefault();
         startCapture();
       }
@@ -82,7 +125,10 @@ export function HomePage() {
   function startCapture() {
     if (capturing) return;
     setCapturing(true);
-    setFrames([]);
+    // reset() 会清掉上一轮的 aiImages / layoutUrl / currentJobId —— 之前
+    // 这些跨路由永久驻留, 连拍两轮后 DecoratePage 可能显示上一次的 AI 成片。
+    reset();
+    retryRef.current = 0;
     setSnapTick((t) => t + 1);
   }
 
@@ -92,21 +138,28 @@ export function HomePage() {
     if (!url) {
       // 摄像头还没出帧(videoWidth === 0)。这里必须继续排下一轮倒计时,
       // 否则整个连拍会永久停住 —— 用户只能刷新页面。
-      // 最多重试 SNAP_MAX_RETRY 次,避免摄像头始终不可用时无限循环。
-      if (frames.length < SNAP_MAX_RETRY) {
+      // 用独立的 retry 计数, 不能拿「已拍张数」当重试次数(那是两个
+      // 不同语义: 检不到帧时 frames 恒为 0, 会被当成永不超限)。
+      // 存 ref 而非 state: 它只用于这里的判断, 不需要触发重渲染。
+      const c = retryRef.current;
+      retryRef.current = c + 1;
+      if (c < SNAP_MAX_RETRY) {
         setSnapTick((t) => t + 1);
       } else {
         setCapturing(false);
       }
       return;
     }
+    retryRef.current = 0;
     setFlash(true);
-    setTimeout(() => setFlash(false), 250);
-    const next = [...frames, url];
+    timers.current.push(window.setTimeout(() => setFlash(false), 250));
+    // burnedIn 取此刻的 maskPreview 快照: snap() 里已按这个值把滤镜
+    // 烧进像素, 之后用户再怎么改开关都不影响这张成片。
+    const next = [...frames, { url, burnedIn: maskPreview }];
     setFrames(next);
     if (next.length >= PHOTO_COUNT) {
       setCapturing(false);
-      setTimeout(() => nav("/decorate"), 400);
+      timers.current.push(window.setTimeout(() => nav("/decorate"), 400));
     } else {
       setSnapTick((t) => t + 1);
     }
@@ -130,7 +183,7 @@ export function HomePage() {
         {/* 摄像头全程保持挂载:连拍期间反复开关会触发 getUserMedia 竞态与设备抢占 */}
         <LiveCamera
           ref={camRef}
-          onCapture={() => {}}
+          onCapture={noop}
           active={true}
           frame={maskPreview ? frameMeta[frame] : undefined}
           filter={maskPreview ? filterMeta[filter] : undefined}
@@ -216,7 +269,9 @@ export function HomePage() {
               key={i}
               className="aspect-[3/4] bg-white rounded-lg border-2 border-pink overflow-hidden"
             >
-              {frames[i] && <img src={frames[i]} className="w-full h-full object-cover" />}
+              {frames[i] && (
+                <img src={frames[i].url} className="w-full h-full object-cover" />
+              )}
             </div>
           ))}
         </div>

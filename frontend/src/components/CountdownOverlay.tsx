@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface Props {
   /**
@@ -21,6 +21,16 @@ interface Props {
 export function CountdownOverlay({ tick, onComplete, stepMs = 900, from = 3 }: Props) {
   const [n, setN] = useState<number>(from);
   const [active, setActive] = useState(false);
+  // onComplete 走 ref 而不是进依赖数组: 它每次渲染都是新函数(父组件里是内联
+  // 箭头函数), 若直接进依赖, 倒计时 effect 会被父组件的任意重渲染打断重启。
+  // 这里只在挂载时读一次最新引用 —— 语义上等价于"调用时拿当前回调",
+  // 但不再依赖「父组件每次都必然改 tick」这个隐式不变量。
+  // LiveCamera 的 snapRef 是同一手法。
+  // ref 的同步放在 effect 里, 不在渲染期写(并发模式下不安全)。
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  });
 
   useEffect(() => {
     if (tick <= 0) return;
@@ -32,7 +42,7 @@ export function CountdownOverlay({ tick, onComplete, stepMs = 900, from = 3 }: P
       count--;
       if (count <= 0) {
         setActive(false);
-        onComplete();
+        onCompleteRef.current();
         return;
       }
       setN(count);
@@ -40,8 +50,7 @@ export function CountdownOverlay({ tick, onComplete, stepMs = 900, from = 3 }: P
     };
     timer = window.setTimeout(tickOnce, stepMs);
     return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tick]);
+  }, [tick, from, stepMs]);
 
   if (!active || n <= 0) return null;
   return (

@@ -1,5 +1,6 @@
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -124,7 +125,7 @@ function describeError(e: unknown): string | null {
   return msg;
 }
 
-export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamera(
+const LiveCameraInner = forwardRef<LiveCameraHandle, Props>(function LiveCamera(
   {
     onCapture,
     active,
@@ -251,6 +252,9 @@ export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamer
 
         if (!isCurrent()) return;
         if (el.srcObject !== stream) return; // 节点已被替换,交给 attach 处理
+        // 重试成功即视为设备已可用, 清掉标记 —— 否则本次会话后续再遇到
+        // NotReadableError(设备被再次占用)就不会自动重试, 直接弹硬错误。
+        retriedRef.current = false;
         setError(null);
         setState("live");
       } catch (e) {
@@ -285,9 +289,23 @@ export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamer
   // video 节点被 React 重建时(StrictMode / 重渲染),把新节点重新接上已有流。
   // 这是 play() 中断的真正兜底:旧节点的 promise 会 reject,但新节点能续上。
   const attach = useCallback((el: HTMLVideoElement | null) => {
+    const prev = videoRef.current;
+    // 节点被卸载(切路由 / 错误态提前 return)时 React 会回调 attach(null)。
+    // 此时必须主动停轨道:停止 track 的唯一位置是上面 effect 的 cleanup,
+    // 而错误态下 effect 依赖 [active, retryKey] 都没变, cleanup 不会跑 ——
+    // 结果是摄像头被持续占用、硬件指示灯常亮。这里补上释放。
+    if (el === null && prev) {
+      prev.srcObject = null;
+    }
     videoRef.current = el;
     const stream = streamRef.current;
-    if (!el || !stream) return;
+    if (!el || !stream) {
+      if (el === null) {
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      return;
+    }
     if (el.srcObject === stream) return;
     el.srcObject = stream;
     el.play()
@@ -428,3 +446,11 @@ export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamer
     </div>
   );
 });
+
+// memo 不是可选优化: HomePage 每次连拍倒计时 tick 都自增 state 并重渲染,
+// 而本组件内部有 getUserMedia / canvas 重绘 / 蒙版层渲染。不加 memo 时,
+// 一轮连拍会白白重渲染十几次, 每次都重跑那些 effect 与 draw。
+//
+// 依赖 props 必须是稳定引用 —— 父组件用 useMemo 把 snapshot 包成稳定对象
+// 正是为此。若这里传的是每次新建的对象/数组, 浅比较会失败, memo 形同虚设。
+export const LiveCamera = memo(LiveCameraInner);

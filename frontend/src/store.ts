@@ -1,8 +1,24 @@
 import { create } from "zustand";
 import type { FilterInfo, FilterKey, FrameInfo, FrameKey, LayoutKey, StyleKey } from "./types";
 
+/**
+ * 一张连拍照。
+ *
+ * burnedIn 是**拍照那一刻**的快照: 取景页的 maskPreview 滤镜是否已通过
+ * canvas ctx.filter 烧进这张图。它必须逐帧记录, 不能在 DecoratePage 里读
+ * 当前的 maskPreview —— 那是取景页一个随时可改的 UI 开关, 用户在拍照后
+ * 翻转它会导致状态漂移: 关掉 -> 后端重复调色一次(二次调色);
+ * 打开 -> 后端跳过, grain/vignette 静默丢失。
+ */
+export interface Frame {
+  /** dataURL */
+  url: string;
+  /** 滤镜是否已烧进 url(取景时 maskPreview 为真) */
+  burnedIn: boolean;
+}
+
 export interface CaptureState {
-  frames: string[];            // dataURL
+  frames: Frame[];
   currentJobId: string | null;
   filter: FilterKey;
   style: StyleKey;
@@ -12,7 +28,7 @@ export interface CaptureState {
   aiImages: string[];
   layoutUrl: string | null;
   // 取景框实时预览需要相框/滤镜的完整参数(css、vignette、pad...).
-  // 缓存在 store 里,避免 HomePage 与 DecoratePage 各自重复 fetch /api/meta。
+  // HomePage 拉到 /api/meta 后写进这里, DecoratePage 直接复用, 不再重复请求。
   frameMeta: Record<string, FrameInfo>;
   filterMeta: Record<string, FilterInfo>;
   // 用户是否开启"拍照时实时叠加蒙版"。默认开 —— 这正是本次要交付的体验。
@@ -22,7 +38,7 @@ export interface CaptureState {
   maskKey: string;
   /** 蒙版图库抽屉是否展开 */
   maskGalleryOpen: boolean;
-  setFrames: (f: string[]) => void;
+  setFrames: (f: Frame[]) => void;
   setCurrentJobId: (id: string | null) => void;
   setFilter: (f: FilterKey) => void;
   setStyle: (s: StyleKey) => void;
@@ -75,6 +91,9 @@ export const useStore = create<CaptureState>((set) => ({
   setShowGuides: (v) => set({ showGuides: v }),
   setMaskKey: (v) => set({ maskKey: v }),
   setMaskGalleryOpen: (v) => set({ maskGalleryOpen: v }),
+  // 开始新一轮连拍时清掉上一轮的成片。DecoratePage 的 layoutUrl 可能是
+  // blob: URL, 这里只置空 —— 真正的 revoke 在 DecoratePage 的卸载 effect 里做,
+  // 因为那里才知道当前值是不是自己创建的 blob。
   reset: () =>
     set({
       frames: [],

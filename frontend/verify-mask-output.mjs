@@ -133,7 +133,10 @@ const burn = await page.evaluate(() => {
   const s = window.__store;
   const frames = s.getState().frames;
   if (!frames.length) return { ok: false, reason: "store 内无成片" };
-  return { ok: true, count: frames.length, first: frames[0] };
+  // frames 元素现在是 {url, burnedIn}(见 store.ts 的 Frame), 兼容旧的裸字符串。
+  const entry = frames[0];
+  const first = typeof entry === "string" ? entry : entry.url;
+  return { ok: true, count: frames.length, first, burnedIn: entry.burnedIn };
 });
 check("真实流程产出 4 张成片", burn.ok && burn.count >= 4, burn.reason ?? `${burn.count} 张`);
 

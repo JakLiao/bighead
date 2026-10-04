@@ -109,8 +109,11 @@ await page.keyboard.press("Space");
 await page.waitForFunction(() => window.__store.getState().frames.length >= 4, { timeout: 60000 });
 
 const burn = await page.evaluate(async () => {
-  const first = window.__store.getState().frames[0];
-  if (!first) return { ok: false, reason: "store 内无成片" };
+  // frames 元素现在是 {url, burnedIn} 而非裸 dataURL 字符串(见 store.ts 的 Frame)。
+  const entry = window.__store.getState().frames[0];
+  if (!entry) return { ok: false, reason: "store 内无成片" };
+  const first = typeof entry === "string" ? entry : entry.url;
+  const burnedIn = typeof entry === "string" ? null : entry.burnedIn;
 
   const img = new Image();
   await new Promise((res, rej) => {
@@ -133,12 +136,18 @@ const burn = await page.evaluate(async () => {
     h: c.height,
     corner: [...corner],
     center: [...center],
+    burnedIn,
   };
 });
 
 check("拍照流程产出成片", burn.ok, burn.reason ?? `${burn.w}x${burn.h}`);
 if (burn.ok) {
-  // 粉色边框 R=253 G=216 B=225,容差 ±12(考虑 JPEG 压缩)
+  // 本次修复把 frames 元素改成 {url, burnedIn}; burnedIn 记录的是**拍照那一刻**
+  // 是否有滤镜烧入。这里开着「实时蒙版预览」拍照, 期望为 true —— 若为 false,
+  // 说明 DecoratePage 会误判成"未烧录"从而让后端重复调色。
+  check("burnedIn 已随帧记录", burn.burnedIn === true, `burnedIn=${burn.burnedIn}`);
+
+  // 粉色边框 R=253 G=216 B=225,容差 ±14(考虑 JPEG 压缩)
   const [r, gg, b] = burn.corner;
   const isPinkFrame =
     Math.abs(r - 253) < 14 && Math.abs(gg - 216) < 14 && Math.abs(b - 225) < 14;

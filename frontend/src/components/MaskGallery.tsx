@@ -142,7 +142,12 @@ export function MaskGallery({ selected, onSelect, onClose }: Props) {
     };
   }, []);
 
-  const all = useMemo(() => getAllSummaries(), [ready]);
+  // ready 只作为「manifest 已就位」的信号, 体内不读它 —— eslint 会报
+  // unnecessary dependency。显式 void 一下表达意图: ready 翻转时重算。
+  const all = useMemo(() => {
+    void ready;
+    return getAllSummaries();
+  }, [ready]);
   const categories = useMemo(() => [ALL, ...getCategories(all)], [all]);
   const list = useMemo(() => filterMasks(all, query, category), [all, query, category]);
   const selectedDef = getMask(selected);
