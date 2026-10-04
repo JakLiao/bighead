@@ -1,8 +1,8 @@
 """端到端验证 AI 生成:全新 job,模拟前端真实时序(先 POST 再连 WS)。"""
-import asyncio, json, time, urllib.request, uuid, io
+import asyncio, json, os, time, urllib.request, uuid, io
 from pathlib import Path
 ROOT = Path(r"F:\Trae-work\bighead")
-BASE = "http://127.0.0.1:8000"
+BASE = os.environ.get("BIGHEAD_API_TARGET", "http://127.0.0.1:8077").rstrip("/")
 SRC = ROOT / "outputs" / "07e0f132b93d"
 
 def multipart(fields, files):
@@ -35,7 +35,8 @@ print("2. generation triggered (WS not yet connected -- the racy order)")
 async def watch():
     import websockets
     got, t0 = [], time.time()
-    async with websockets.connect(f"ws://127.0.0.1:8000/ws/jobs/{job}") as s:
+    ws_base = BASE.replace("http", "ws", 1)
+    async with websockets.connect(f"{ws_base}/ws/jobs/{job}") as s:
         try:
             while True:
                 m = json.loads(await asyncio.wait_for(s.recv(), timeout=150))

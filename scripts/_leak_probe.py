@@ -2,7 +2,7 @@
 import json, subprocess, sys, time, urllib.request, urllib.parse, uuid, io, os
 
 PID = 37152
-BASE = "http://127.0.0.1:8000"
+BASE = os.environ.get("BIGHEAD_API_TARGET", "http://127.0.0.1:8077").rstrip("/")
 CYCLES = int(sys.argv[1]) if len(sys.argv) > 1 else 3
 STEPS = sys.argv[2] if len(sys.argv) > 2 else "4"
 

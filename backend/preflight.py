@@ -90,9 +90,12 @@ def report() -> bool:
     if guess:
         print("")
         print("  本项目复用 Stable Diffusion WebUI 的 venv, 请用该解释器启动:")
-        print(f"    {guess} -m uvicorn backend.app:app --port 8000")
+        print(f"    {guess} -m uvicorn backend.app:app --port 8077")
     else:
         print("")
         print("  找不到 webui venv, 请确认启动命令用的是正确的解释器(见 README)。")
+    print("  另注: peft 需先经 backend.peft_compat.ensure_peft() 打补丁才能 import,")
+    print("        直接 import peft 会报 EncoderDecoderCache 缺失, 属正常现象。")
+    print("  完整规则见 .trae/rules/project_rules.md")
     print("=" * 60)
     return False

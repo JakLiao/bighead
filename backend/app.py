@@ -91,4 +91,7 @@ async def _startup():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("backend.app:app", host="0.0.0.0", port=8000, reload=False)
+    # 必须与 .trae/rules/project_rules.md 一致: 127.0.0.1 而非 0.0.0.0(本服务
+    # 无认证, 绑全网卡等于把用户人脸照片暴露给整个局域网), 8077 而非 8000(本机
+    # 8000 常被其他服务占用)。命令行启动请直接用 uvicorn, 见 README。
+    uvicorn.run("backend.app:app", host="127.0.0.1", port=8077, reload=False)

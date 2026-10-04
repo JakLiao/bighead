@@ -22,9 +22,12 @@
 ### 1. 启动后端
 双击 `scripts/run.bat`,或手动:
 ```bash
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 0.0.0.0 --port 8000
+E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 ```
-后端:http://localhost:8000
+后端:http://localhost:8077
+
+> 解释器必须是上面那个 webui venv 的 `python.exe`,不能用 conda 或 PATH 里的
+> `python`——详见 [.trae/rules/project_rules.md](.trae/rules/project_rules.md)。
 
 ### 2. 启动前端
 ```bash
@@ -33,6 +36,14 @@ npm install
 npm run dev
 ```
 前端:http://localhost:5173
+
+必须显式指明后端地址,否则 vite 会代理到默认的 8000:
+```bash
+# Windows PowerShell
+$env:BIGHEAD_API_TARGET="http://127.0.0.1:8077"
+# macOS / Linux
+# export BIGHEAD_API_TARGET=http://127.0.0.1:8077
+```
 
 ### 3. 打开浏览器
 打开 http://localhost:5173,允许摄像头权限,按空格开始连拍。
@@ -93,11 +104,11 @@ RTX 5070 Ti,SDXL + FaceID + 胶片 LoRA(未融合),steps=20,固定 seed 实测:
 
 ```powershell
 # 8GB 预算(默认,原设计口径)
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8000
+E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
 
 # 整条常驻显存(更快,占 11.65GB)
 $env:BIGHEAD_NO_OFFLOAD="1"
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8000
+E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
 ```
 
 ### 开关二:智能裁切(消除拼贴留白)

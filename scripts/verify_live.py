@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -20,7 +21,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-BASE = "http://127.0.0.1:8000"
+# 与后端约定端口一致(8077); 如跑在其它实例上, 用 BIGHEAD_API_TARGET 覆盖。
+BASE = os.environ.get("BIGHEAD_API_TARGET", "http://127.0.0.1:8077").rstrip("/")
 EXPORTS = ROOT / "outputs" / "_verify"
 EXPORTS.mkdir(parents=True, exist_ok=True)
 
