@@ -25,7 +25,6 @@ PY = r"E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe"
 
 
 def face_input():
-    import numpy as np
     from PIL import Image
 
     from backend.face import extract_face

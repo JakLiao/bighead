@@ -24,7 +24,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from photo_util import (  # noqa: E402
-    crop_box_for, downscale, face_ratio, fitted_canvas, load_worker,
+    crop_box_for, downscale, face_ratio, fitted_canvas,
 )
 
 TOL = 0.05          # 人脸宽高比允许的偏差

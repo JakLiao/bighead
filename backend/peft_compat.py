@@ -67,7 +67,7 @@ def _patch_transformers() -> bool:
     if hasattr(transformers, "EncoderDecoderCache"):
         return True
 
-    from transformers.cache_utils import Cache, DynamicCache
+    from transformers.cache_utils import DynamicCache
 
     class EncoderDecoderCache:  # noqa: D401 - 仅为通过 import 检查
         """Encoder-Decoder 模型的 KV cache 占位实现.
@@ -126,7 +126,11 @@ def ensure_peft() -> bool:
         return False
 
     try:
-        import peft
+        # 刻意「导入但不赋值」: 这里要的是 import 本身的探测作用 —— 能 import
+        # 成功说明 patch 后的 transformers/accelerate 与 peft 兼容。
+        # 不能让 ruff 把这行删成 `pass`: 那样 try 块永不抛异常,
+        # ensure_peft() 会永远返回 True, 失去检测能力。
+        import peft  # noqa: F401
     except Exception as e:  # pragma: no cover
         log.warning("peft import failed after patch: %s", e)
         return False

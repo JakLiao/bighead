@@ -37,7 +37,7 @@ def report(tag: str) -> None:
 def main() -> int:
     from PIL import Image
 
-    from backend.config import FACEID_SCALE, SDXL_CFG, SDXL_CKPT, STYLES
+    from backend.config import STYLES
     from backend.face import _get_app
 
     face_path = sys.argv[1] if len(sys.argv) > 1 else None
@@ -54,7 +54,9 @@ def main() -> int:
     report("0. baseline (torch init)")
 
     # 1) InsightFace
-    app = _get_app()
+    # 刻意不接收返回值: 这里要的就是 _get_app() 的副作用(把模型载入显存),
+    # 返回的 app 对象本脚本不用。
+    _get_app()
     gc.collect(); torch.cuda.empty_cache()
     report("1. after InsightFace buffalo_l")
 

@@ -15,7 +15,6 @@ Qwen 是 image-to-image,身份保真应当是架构级的,所以阈值定 0.55�
 """
 from __future__ import annotations
 
-import gc
 import subprocess
 import sys
 import time

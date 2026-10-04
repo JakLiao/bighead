@@ -1,8 +1,6 @@
 """画廊:扫描 outputs/,列出历次任务."""
 from __future__ import annotations
 
-import os
-from pathlib import Path
 
 from fastapi import APIRouter
 
@@ -12,7 +10,13 @@ router = APIRouter()
 
 
 @router.get("/api/gallery")
-async def gallery():
+def gallery():
+    """扫描 outputs/ 列出历次任务。
+
+    刻意用同步 def: 这里是纯同步磁盘 IO(遍历目录 + 每个 job 再 stat/glob),
+    随历史任务累积会越来越慢, 跑在事件循环里会连带卡住 WS 进度推送。
+    FastAPI 对普通 def 自动走线程池。
+    """
     items: list[dict] = []
     if not OUTPUT_DIR.exists():
         return {"items": []}

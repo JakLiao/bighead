@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 # 关键:先导入 config,其中的环境设置(代理/HF 缓存/CUDA 缓存)必须在
 # torch / diffusers / transformers 被加载之前生效
@@ -17,9 +18,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 
 app = FastAPI(title="BigHead · 大头贴复古", version="0.1.0")
 
+# 只放开明确的开发源。之前这里含 "*" 且同时 allow_credentials=True,
+# Starlette 会原样回显请求的 Origin(规范下 "*" + credentials 组合本就无效),
+# 等价于「任意网站可带凭据访问」—— 而 /outputs 挂载的是用户生成的照片,
+# 且服务绑 0.0.0.0 暴露在局域网, 风险实际可达。需要放开时用环境变量追加。
+_allowed = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+_extra = os.environ.get("BIGHEAD_EXTRA_ORIGINS", "").strip()
+if _extra:
+    _allowed.extend(o.strip() for o in _extra.split(",") if o.strip())
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],
+    allow_origins=_allowed,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

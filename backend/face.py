@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 
 import numpy as np
 from PIL import Image
@@ -9,23 +10,33 @@ from PIL import Image
 from .config import INSIGHTFACE_ROOT
 
 _app = None
+# 双重检查锁: app.py 启动预热线程与 pipeline.generate_async 的
+# asyncio.to_thread 工作线程会并发调 _get_app()。无锁时两个线程可能
+# 同时看到 _app is None, 各加载一遍 640x640 模型(数秒 + 一份显存),
+# 后写的覆盖先写的, 先前那个实例被 GC 时连同它的 CUDA context 一起释放。
+_app_lock = threading.Lock()
 
 
 def _get_app():
     global _app
-    if _app is None:
+    if _app is not None:
+        return _app
+    with _app_lock:
+        if _app is not None:
+            return _app
         from insightface.app import FaceAnalysis
 
-        _app = FaceAnalysis(
+        app = FaceAnalysis(
             name="buffalo_l",
             root=str(INSIGHTFACE_ROOT),
             providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
         )
         try:
-            _app.prepare(ctx_id=0, det_size=(640, 640))
+            app.prepare(ctx_id=0, det_size=(640, 640))
         except Exception:
-            _app.prepare(ctx_id=-1, det_size=(640, 640))
-    return _app
+            app.prepare(ctx_id=-1, det_size=(640, 640))
+        _app = app
+        return _app
 
 
 @dataclass

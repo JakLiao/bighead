@@ -1,13 +1,12 @@
 """AI 写真生成:异步任务 + WS 进度."""
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Form, HTTPException
 
 from ..config import OUTPUT_DIR, STYLES
-from ..jobs import new_job, update
+from ..jobs import update
 from ..pipeline import pipeline
 from .. import ws
 
@@ -54,18 +53,32 @@ async def _run(job_id: str, photo_paths: list[Path], style: str, steps: int | No
             steps=steps,
         )
         # 把产物与显存峰值写回任务状态,前端轮询 /api/jobs/{id} 才能拿到结果
+        images = [f"/outputs/{job_id}/ai/{style}/{Path(p).name}" for p in result.image_paths]
         update(
             job_id,
             status="done",
             style=style,
             current=len(result.image_paths),
             total=len(photo_paths),
-            images=[f"/outputs/{job_id}/ai/{style}/{Path(p).name}" for p in result.image_paths],
+            images=images,
             vram_peak_gb=round(result.vram_peak_gb, 2),
+            layout_url=_build_layout(job_id, result.image_paths, style),
         )
     except Exception as e:
         await ws.broadcast(job_id, {"status": "error", "msg": str(e)})
         update(job_id, status="error", style=style, msg=str(e))
+
+
+def _build_layout(job_id: str, image_paths: list[str], style: str) -> str | None:
+    """把 AI 产出拼成一张大图, 返回可访问的 URL。
+
+    真正实现在 pipeline._build_ai_layout —— 放在那里是因为 WS 的 done 广播
+    也需要同一个 URL, 两处各拼一次会写出两份 layout.jpg 并互相覆盖
+    (换风格重跑时尤其容易踩)。
+    """
+    from ..pipeline import build_ai_layout
+
+    return build_ai_layout(image_paths, OUTPUT_DIR / job_id / "ai" / style)
 
 
 @router.get("/api/jobs/{job_id}")

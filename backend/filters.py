@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import io
+from functools import lru_cache
 
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 
 from .config import FILTERS
 
@@ -50,26 +51,44 @@ def _fade(bgr: np.ndarray, amount: float) -> np.ndarray:
     """amount 0..1, 越大越淡(高光下压、阴影上提)."""
     if amount <= 0:
         return bgr
-    white = np.full_like(bgr, 255, dtype=np.uint8)
-    return cv2.addWeighted(bgr, 1 - amount, white, amount, 0)
+    # 之前 np.full_like 每次分配一整张全白图再交给 addWeighted 做加权。
+    # 这里改成把常量项折进 addWeighted 的 offset(第 5 个参数 beta):
+    #   dst = src*alpha + 255*amount
+    # 免掉那张全白临时图。
+    return cv2.addWeighted(bgr, 1 - amount, bgr, 0.0, 255 * amount)
 
 
 def _grain(bgr: np.ndarray, sigma: float) -> np.ndarray:
     if sigma <= 0:
         return bgr
-    noise = np.random.normal(0, sigma, bgr.shape).astype(np.float32)
-    out = cv2.convertScaleAbs(bgr.astype(np.float32) + noise)
-    return out
+    # cv2.randn(dst, mean, stddev) 是**原地填充**, 直接写进预分配的 float32
+    # 缓冲。原实现 np.random.normal(0, sigma, shape).astype(np.float32) 先落一张
+    # 全尺寸 float64(1280x960x3 约 29MB)再转 float32, 峰值内存翻倍且多一次
+    # 全图转换; 现在除结果本身外不额外占内存。
+    noise = np.empty(bgr.shape, dtype=np.float32)
+    cv2.randn(noise, 0.0, sigma)
+    return cv2.convertScaleAbs(bgr.astype(np.float32) + noise)
+
+
+@lru_cache(maxsize=8)
+def _vignette_mask(h: int, w: int, strength: float) -> np.ndarray:
+    """按 (h, w, strength) 缓存暗角掩码。
+
+    预设是静态的, 连拍/拼图时同一尺寸会反复调用 —— 之前的实现每次都重算
+    ogrid + sqrt 的全分辨率距离场, 纯属重复劳动。返回的数组只读, 调用方
+    不得修改。
+    """
+    y, x = np.ogrid[:h, :w]
+    cy, cx = h / 2, w / 2
+    dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2) / np.sqrt(cx**2 + cy**2)
+    return np.clip(1 - dist * strength, 0.4, 1.0).astype(np.float32)
 
 
 def _vignette(bgr: np.ndarray, strength: float) -> np.ndarray:
     if strength <= 0:
         return bgr
     h, w = bgr.shape[:2]
-    y, x = np.ogrid[:h, :w]
-    cy, cx = h / 2, w / 2
-    dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2) / np.sqrt(cx**2 + cy**2)
-    mask = np.clip(1 - dist * strength, 0.4, 1.0).astype(np.float32)
+    mask = _vignette_mask(h, w, float(strength))
     out = (bgr.astype(np.float32) * mask[..., None]).clip(0, 255).astype(np.uint8)
     return out
 
@@ -87,9 +106,9 @@ def _vhs(bgr: np.ndarray, shift: int) -> np.ndarray:
     r = np.roll(r, shift, axis=1)
     b = np.roll(b, -shift, axis=1)
     out = cv2.merge([b, g, r])
-    h = out.shape[0]
-    for y in range(0, h, 2):
-        out[y] = (out[y].astype(np.float32) * 0.85).astype(np.uint8)
+    # 扫描线: 原来对 y=0,2,4... 逐行做一次 astype+乘法(每行一次 Python 往返,
+    # 1080 行就是 540 次)。改成对切片整体做一次乘法, 视觉结果完全一致。
+    out[::2] = (out[::2].astype(np.float32) * 0.85).astype(np.uint8)
     return out
 
 

@@ -54,7 +54,6 @@ def main() -> int:
     ap.add_argument("--quick", action="store_true", help="只测 512x768 一档")
     args = ap.parse_args()
 
-    import numpy as np
     import torch
     from PIL import Image
 

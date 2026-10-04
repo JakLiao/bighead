@@ -2,22 +2,27 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Response
 from PIL import Image
 
-from ..config import LAYOUTS, OUTPUT_DIR
+from ..config import LAYOUTS
 
 router = APIRouter()
 
 
 @router.post("/api/layout/make")
-async def layout_make(
+def layout_make(
     images: list[bytes] = File(...),
     layout: str = Form("2x2"),
     frame: str = Form("plain_white"),
 ):
+    """拼图排版。
+
+    刻意用同步 def: 解码 N 张图 + 拼接 + JPEG 编码是 CPU 密集操作,
+    在事件循环里执行会阻塞同 worker 上的所有请求(含 WebSocket 进度推送)。
+    FastAPI 对普通 def 自动走线程池。参见 preview.preview_filter 的说明。
+    """
     if layout not in LAYOUTS:
         raise HTTPException(400, f"unknown layout: {layout}")
     try:

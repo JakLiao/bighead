@@ -283,7 +283,7 @@ def build_pearl_bow():
     top, bottom = (252, 250, 246), (232, 224, 210)
     img = vgradient((W * SS, H * SS), top, bottom).convert("RGBA")
     s = SS
-    cx, cy = W * s / 2, H * s / 2
+    cx = W * s / 2
     d = ImageDraw.Draw(img)
     gold = (190, 162, 112)
 
@@ -326,7 +326,7 @@ def _cartoon_base(bg, ink="#2B2B2B"):
 def build_cartoon_speech():
     img, d, ink = _cartoon_base((255, 233, 240))
     s = SS
-    cx, cy = W * s / 2, H * s / 2
+    cx = W * s / 2
 
     # 气泡主体 + 尾巴
     body = [180 * s, 96 * s, (W - 180) * s, (H - 150) * s]
@@ -437,7 +437,6 @@ def build_cartoon_dual():
 def build_vintage_ticket():
     img = vgradient((W * SS, H * SS), (246, 238, 220), (226, 210, 184)).convert("RGBA")
     s = SS
-    cx, cy = W * s / 2, H * s / 2
     d = ImageDraw.Draw(img)
     ink = (74, 60, 46)
 

@@ -406,9 +406,21 @@ def do_gen(req: dict) -> dict:
     }
 
 
+# 连续多少次模型加载失败后, worker 主动退出交由父进程重启。
+# 3 次是个折中: 单次失败可能是显存瞬时不足或驱动抖动, 直接退出太激进;
+# 但一直半死着让每个请求重试 75s 也不行。
+MAX_LOAD_FAILURES = 3
+
+
 def main() -> int:
     # 主动推送, 不带 rid —— 父进程只拿它更新状态, 不会当成任何请求的应答。
     send({"ok": True, "event": "boot", "pid": os.getpid()})
+    # 连续加载失败次数。达到上限就退出, 让父进程在 _spawn() 里拉起新进程。
+    # 之前加载失败只回一条错误就继续活着, 于是:
+    #   - 进程还在, 父进程 poll() 判定它健康, 永远不会重启;
+    #   - _pipe 永远是 None, 之后每个 gen 请求都会重试一次 75s 的加载;
+    #   - 失败信息只回给单个用户, 进程处于半死状态。
+    load_failures = 0
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -434,9 +446,17 @@ def main() -> int:
                 # 父进程按 event 名把它当成主动通知跳过了, 于是继续 readline
                 # 一直阻塞到 1800s 超时 —— 模型明明 3.5 分钟就绪了。
                 reply(req, {"ok": True, "event": "ready", "lora_layers": _lora_n})
+                load_failures = 0
             except Exception as e:
+                load_failures += 1
                 reply(req, {"ok": False, "error": f"{type(e).__name__}: {e}",
                             "trace": traceback.format_exc()[-1500:]})
+                if load_failures >= MAX_LOAD_FAILURES:
+                    # 回完这一条就退出, 不能在 while 里 return —— 父进程还在
+                    # 等这条应答的 rid, 必须让它先写出去。
+                    log(f"模型连续 {load_failures} 次加载失败, worker 退出让父进程重启")
+                    sys.stdout.flush()
+                    return 3
         elif op == "warmup":
             # 幂等: 已经预热过就直接应答, 别让父进程空等超时。
             reply(req, {"ok": True, "event": "ready", "lora_layers": _lora_n})
@@ -444,8 +464,14 @@ def main() -> int:
             if _pipe is None:
                 try:
                     load_pipeline()
+                    load_failures = 0
                 except Exception as e:
+                    load_failures += 1
                     reply(req, {"ok": False, "error": f"load failed: {e}"})
+                    if load_failures >= MAX_LOAD_FAILURES:
+                        log(f"模型连续 {load_failures} 次加载失败, worker 退出让父进程重启")
+                        sys.stdout.flush()
+                        return 3
                     continue
             try:
                 reply(req, do_gen(req))

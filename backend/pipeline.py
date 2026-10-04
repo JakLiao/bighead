@@ -20,12 +20,10 @@ from .config import (
     ACTIVE_BACKBONE,
     FACEID_LORA_SDXL,
     FACEID_SCALE,
-    INSIGHTFACE_ROOT,
     IPADAPTER_FACEID_SD15,
     IPADAPTER_FACEID_SDXL,
     LORA_SCALE,
     OUTPUT_DIR,
-    PROJECT_ROOT,
     SD15_CKPT,
     SD15_ENABLED,
     SD15_SIZE,
@@ -34,8 +32,6 @@ from .config import (
     SDXL_CFG,
     SDXL_SIZE,
     SDXL_STEPS,
-    SDXL_VAE,
-    VRAM_BUDGET_GB,
 )
 from .face import extract_face
 from . import ws
@@ -109,7 +105,6 @@ class BigHeadPipeline:
         self.current_backbone = backbone
 
     def _load_sdxl(self) -> None:
-        from ip_adapter import IPAdapterFaceIDXL  # type: ignore
 
         if not SDXL_CKPT.exists():
             raise FileNotFoundError(f"SDXL checkpoint not found: {SDXL_CKPT}")
@@ -284,8 +279,6 @@ class BigHeadPipeline:
         IP-Adapter 改写的是 attn_processor 对象,两者层面不同、可共存;
         但若顺序反过来,fuse 的结果不会进入 IP processor 的 lora 分支。
         """
-        from .config import LORA_SCALE
-
         if not self.lora_enabled:
             log.info("style LoRA disabled by env BIGHEAD_LORA=0")
             return False
@@ -585,8 +578,12 @@ class BigHeadPipeline:
 
             from .face import _get_app
 
-            arr = np.asarray(img.convert("RGB"), dtype=np.float32)
-            faces = _get_app().get(arr.astype(np.uint8))
+            rgb = img.convert("RGB")
+            # InsightFace 只吃 uint8。转换只做一次: 之前 arr.astype(np.uint8)
+            # 会在已有 uint8 原图的情况下再转成 float32 又转回来,多一整份全图分配。
+            u8 = np.asarray(rgb, dtype=np.uint8)
+            arr = u8.astype(np.float32)
+            faces = _get_app().get(u8)
             if not faces:
                 return img
             f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
@@ -762,15 +759,50 @@ class BigHeadPipeline:
         urls = [
             f"/{Path(p).relative_to(OUTPUT_DIR.parent).as_posix()}" for p in out_paths
         ]
+        # 拼图在这里生成, 而不是让前端把 4 张图下载再上传一遍。
+        # JobStatus.layout_url / 前端 types.ts 早就定义了, 但一直没人写这个
+        # 字段 —— 前后端一致地缺实现, 于是 AI 模式的拼图区域永不出现。
+        layout_url = build_ai_layout(out_paths, out_dir)
         await ws.broadcast(job_id, {
             "status": "done",
             "current": total,
             "total": total,
             "style": style_key,
             "images": urls,
+            "layout_url": layout_url,
             "vram_peak_gb": round(vram_peak, 2),
         })
         return GenerationOutput(image_paths=out_paths, vram_peak_gb=vram_peak)
+
+
+def build_ai_layout(image_paths: list[str], out_dir: Path) -> str | None:
+    """把 AI 产出拼成一张大图, 落盘到 out_dir/layout.jpg, 返回可访问 URL。
+
+    放在服务端而不是让前端拼: AI 成片已经在 outputs 下了, 让浏览器把 4 张
+    下载成 Blob 再 multipart 上传回 /api/layout/make 是纯粹的双向往返。
+    之前 JobStatus.layout_url 与前端 types.ts 都定义了这个字段, 却没有任何
+    一处写它 —— 前后端一致地缺实现, 于是 AI 模式的拼图区域永不出现。
+
+    失败不抛: 图片本身已经生成好了, 拼图只是锦上添花, 失败就返回 None,
+    前端退化为只展示单图列表。
+    """
+    if not image_paths:
+        return None
+    try:
+        from PIL import Image
+
+        from .layouts import collage_to_bytes
+
+        pils = [Image.open(p).convert("RGB") for p in image_paths]
+        # frame 用 "none": AI 成片已在风格阶段定调, 再叠一层相框会压掉效果。
+        data = collage_to_bytes(pils, "2x2", "none")
+        out = out_dir / "layout.jpg"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        return f"/{out.relative_to(OUTPUT_DIR.parent).as_posix()}"
+    except Exception:
+        log.exception("AI 拼图失败, 降级为只展示单图")
+        return None
 
 
 def _clip_vision_path() -> Path:

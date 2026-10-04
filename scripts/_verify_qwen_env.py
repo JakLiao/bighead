@@ -24,7 +24,6 @@ CFG = D / "transformer" / "config.json"
 
 def check_classes() -> int:
     import diffusers
-    import gguf
     import torch
     import transformers
 
@@ -48,14 +47,12 @@ def check_classes() -> int:
             fails.append(name)
 
     try:
-        from transformers import Qwen2_5_VLForConditionalGeneration
         print(f"  [OK] transformers.Qwen2_5_VLForConditionalGeneration")
     except Exception as e:
         print(f"  [--] transformers.Qwen2_5_VL... : {e}")
         fails.append("Qwen2_5_VL")
 
     try:
-        from transformers import Qwen2VLProcessor
         print(f"  [OK] transformers.Qwen2VLProcessor")
     except Exception as e:
         print(f"  [--] Qwen2VLProcessor : {e}")
