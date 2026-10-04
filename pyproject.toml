@@ -1,0 +1,22 @@
+# Ruff 配置 —— 与 tsc -b 同级的前端/后端静态检查。
+#
+# 之前项目零 lint, 审查文档里列出的多数问题(未用变量、未定义名、导入顺序)
+# 全靠人工发现, 极易回归。这里只开「高信噪比」规则集:
+#   F  = pyflakes, 抓未用导入/未定义名/变量遮蔽等真问题
+#   E9 = 语法错误
+# 刻意不开 E501(行宽)与 W/style 类, 避免与既有代码风格冲突、淹没真问题。
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# vendor/ 是从上游抄来的第三方代码, 不改也不 lint。
+extend-exclude = ["backend/vendor"]
+
+[tool.ruff.lint]
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py 里的 re-export 是有意的, 不算未用导入。
+"backend/__init__.py" = ["F401"]
+# 测试/验证脚本里 print 是正常用法。
+"scripts/*" = ["F541"]
