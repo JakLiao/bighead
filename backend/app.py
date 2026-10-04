@@ -71,6 +71,12 @@ async def _startup():
     print(f"  Output dir: {OUTPUT_DIR}")
     print("=" * 60)
 
+    # 依赖自检: 用错解释器时服务仍能启动、连拍拼图也正常, 只有 AI 会炸,
+    # 报错还发生在用户点「生成」之后(见 backend/preflight.py 的说明)。
+    from .preflight import report as _preflight
+
+    _preflight()
+
     if AI_BACKEND == "qwen":
         # Qwen 必须提前预热: 模型加载 75s + 首次 CUDA kernel 懒加载 145s
         # ≈ 3.5 分钟。不预热的话第一个用户请求要独吞这份开销, 表现为
