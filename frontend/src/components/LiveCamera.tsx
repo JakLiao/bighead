@@ -10,7 +10,7 @@ import {
 import { MaskOverlay } from "./MaskOverlay";
 import { computeFrameGeometry } from "./frameGeometry";
 import { renderMaskLayer } from "./masks/renderMask";
-import { getMask } from "./masks/maskDefs";
+import { getMask, loadMaskImage } from "./masks/maskLibrary";
 import type { FilterInfo, FrameInfo } from "../types";
 
 interface Props {
@@ -156,6 +156,23 @@ export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamer
   const [maskUrl, setMaskUrl] = useState<string | null>(null);
 
   const maskDef = getMask(maskKey);
+  // 位图蒙版需要先把 PNG 解码成 image 才能画进 canvas。
+  // 单独存一份 state,解码完成后触发预览重绘 —— 这是位图蒙版唯一的异步点。
+  const [maskImage, setMaskImage] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    if (maskDef?.kind !== "image") {
+      setMaskImage(null);
+      return;
+    }
+    let alive = true;
+    loadMaskImage(maskDef.src).then((img) => {
+      if (alive) setMaskImage(img);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [maskDef]);
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -175,14 +192,24 @@ export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamer
       setMaskUrl(null);
       return;
     }
+    // 位图蒙版还没解码完就先不画,等 maskImage 到货后本 effect 会重跑
+    if (maskDef.kind === "image" && !maskImage) {
+      setMaskUrl(null);
+      return;
+    }
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const layer = renderMaskLayer(maskDef, Math.round(box.w * dpr), Math.round(box.h * dpr));
+    const layer = renderMaskLayer(
+      maskDef,
+      Math.round(box.w * dpr),
+      Math.round(box.h * dpr),
+      maskImage,
+    );
     if (!layer) {
       setMaskUrl(null);
       return;
     }
     setMaskUrl(layer.toDataURL("image/png"));
-  }, [maskPreview, maskDef, box.w, box.h]);
+  }, [maskPreview, maskDef, maskImage, box.w, box.h]);
 
   useEffect(() => {
     if (!active) return;
@@ -306,10 +333,11 @@ export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamer
     bctx.drawImage(v, sx, sy, sw, sh, 0, 0, outW, outH);
     bctx.filter = "none";
 
-    // 预置蒙版:盖上"挖了洞 + 有贴纸"的图层。洞是透明的,
-    // 所以照片会从人脸形状里透出来 —— 这就是取景框里看到的效果。
+    // 蒙版:盖上"挖了洞 + 有贴纸"的图层(位图蒙版的洞已烘进 alpha)。
+    // 洞是透明的,所以照片会从人脸形状里透出来 —— 这就是取景框里看到的效果。
+    // 传同一份 maskImage,保证成片与预览是同一张图,不会因为重新解码而错位。
     if (maskPreview && maskDef) {
-      const layer = renderMaskLayer(maskDef, outW, outH);
+      const layer = renderMaskLayer(maskDef, outW, outH, maskImage);
       if (layer) bctx.drawImage(layer, 0, 0);
     }
 

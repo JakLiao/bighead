@@ -10,7 +10,32 @@
  * 出现"贴纸糊在人脸前面"的穿帮。
  */
 import { STICKER_SHAPES } from "./geometry";
-import type { MaskDef } from "./maskDefs";
+import type { MaskDef, ProcMaskDef } from "./maskDefs";
+
+/**
+ * 居中铺满(cover):等比缩放到覆盖目标,再居中裁掉溢出部分。
+ *
+ * 位图素材声明是 4:3,与出片比例一致,正常路径下不会真的裁到东西;
+ * 万一素材比例不对,裁切也比拉伸好 —— 拉伸会把"洞"拉变形,
+ * 人脸窗口的位置就与预览不一致了。
+ */
+function drawCover(
+  ctx: CanvasRenderingContext2D,
+  src: CanvasImageSource,
+  w: number,
+  h: number,
+) {
+  const sw = "width" in src ? Number(src.width) : 0;
+  const sh = "height" in src ? Number(src.height) : 0;
+  if (!sw || !sh) {
+    ctx.drawImage(src, 0, 0, w, h);
+    return;
+  }
+  const scale = Math.max(w / sw, h / sh);
+  const dw = sw * scale;
+  const dh = sh * scale;
+  ctx.drawImage(src, (w - dw) / 2, (h - dh) / 2, dw, dh);
+}
 
 /** 单位坐标(0..100)→ 画布像素。以短边为基准,保证正方形不被拉扁。 */
 function unit(w: number, h: number, size = 100) {
@@ -24,7 +49,7 @@ function unit(w: number, h: number, size = 100) {
 
 function drawPattern(
   ctx: CanvasRenderingContext2D,
-  mask: MaskDef,
+  mask: ProcMaskDef,
   w: number,
   h: number,
 ) {
@@ -98,7 +123,7 @@ function drawPattern(
 /** 沿路径填充/描边一个贴纸。 */
 function paintSticker(
   ctx: CanvasRenderingContext2D,
-  d: NonNullable<MaskDef["stickers"]>[number],
+  d: NonNullable<ProcMaskDef["stickers"]>[number],
   w: number,
   h: number,
   path: string,
@@ -131,12 +156,20 @@ function paintSticker(
 
 /**
  * 渲染蒙版层。
+ *
+ * 两类蒙版走同一个出口,返回的都是「带透明镂空的 w×h 画布」:
+ *   · proc  —— 按 holes 挖洞 + 画装饰
+ *   · image —— 洞已烘进 PNG 的 alpha 通道,这里只做一次 drawImage
+ * 因为契约一致,LiveCamera 的取景预览与 snap() 出片无需区分类型,
+ * 也就不存在"预览和成片对不上"的可能。
+ *
  * @returns 带透明镂空的画布,尺寸与 w×h 一致
  */
 export function renderMaskLayer(
   mask: MaskDef | undefined,
   w: number,
   h: number,
+  image?: CanvasImageSource | null,
 ): HTMLCanvasElement | null {
   if (!mask || w <= 0 || h <= 0) return null;
 
@@ -145,6 +178,16 @@ export function renderMaskLayer(
   canvas.height = h;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
+
+  if (mask.kind === "image") {
+    // 素材还没解码完 —— 返回空画布而不是 null,
+    // 这样调用方的重试逻辑只需等图片 onload,不必特判 null。
+    if (!image) return canvas;
+    // 素材是 4:3、与出片同比例,这里铺满即可;若比例不同则居中裁切,
+    // 保证洞的位置不会因为拉伸而偏移。
+    drawCover(ctx, image, w, h);
+    return canvas;
+  }
 
   drawPattern(ctx, mask, w, h);
 
@@ -219,6 +262,7 @@ export function renderMaskLayer(
 export function renderMaskThumb(
   mask: MaskDef | undefined,
   size: number,
+  image?: CanvasImageSource | null,
 ): HTMLCanvasElement | null {
-  return renderMaskLayer(mask, size, size);
+  return renderMaskLayer(mask, size, size, image);
 }

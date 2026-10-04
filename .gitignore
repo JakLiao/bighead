@@ -16,8 +16,9 @@ frontend/.npmcache/
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 
-# Playwright 验证脚本跑出来的截图(verify-*.mjs 本身入库,产物不入库)
+# Playwright 验证脚本跑出来的截图与成片(verify-*.mjs 本身入库,产物不入库)
 frontend/*.png
+frontend/*.jpg
 
 # 模型权重与 HuggingFace 缓存(体积大,不入库)
 # 说明:vendor 下只有 ip_adapter/ 是自研源码,需要入库;
@@ -51,6 +52,9 @@ venv/
 .pylibs/
 .pipcache/
 .piptmp/
+
+# 蒙版素材校验脚本的产物(contact sheet),preview_samples.py 每次重生成
+scripts/mask_assets/preview.png
 
 # IDE
 .vscode/

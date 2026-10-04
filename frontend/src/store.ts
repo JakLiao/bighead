@@ -18,8 +18,10 @@ export interface CaptureState {
   // 用户是否开启"拍照时实时叠加蒙版"。默认开 —— 这正是本次要交付的体验。
   maskPreview: boolean;
   showGuides: boolean;
-  /** 预置蒙版 key(爱心/星星/双圆…)。"none" = 原图。 */
+  /** 蒙版 key。内置为 heart/star…,图库为 manifest 里登记的 key,"none" = 原图。 */
   maskKey: string;
+  /** 蒙版图库抽屉是否展开 */
+  maskGalleryOpen: boolean;
   setFrames: (f: string[]) => void;
   setCurrentJobId: (id: string | null) => void;
   setFilter: (f: FilterKey) => void;
@@ -34,6 +36,7 @@ export interface CaptureState {
   setMaskPreview: (v: boolean) => void;
   setShowGuides: (v: boolean) => void;
   setMaskKey: (v: string) => void;
+  setMaskGalleryOpen: (v: boolean) => void;
   reset: () => void;
 }
 
@@ -56,6 +59,7 @@ export const useStore = create<CaptureState>((set) => ({
   maskPreview: true,
   showGuides: true,
   maskKey: "heart",
+  maskGalleryOpen: false,
   setFrames: (f) => set({ frames: f }),
   setCurrentJobId: (id) => set({ currentJobId: id }),
   setFilter: (f) => set({ filter: f }),
@@ -70,6 +74,7 @@ export const useStore = create<CaptureState>((set) => ({
   setMaskPreview: (v) => set({ maskPreview: v }),
   setShowGuides: (v) => set({ showGuides: v }),
   setMaskKey: (v) => set({ maskKey: v }),
+  setMaskGalleryOpen: (v) => set({ maskGalleryOpen: v }),
   reset: () =>
     set({
       frames: [],

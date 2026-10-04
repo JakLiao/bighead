@@ -53,7 +53,15 @@ export interface TextDef {
   strokeWidth?: number;
 }
 
-export interface MaskDef {
+/**
+ * 代码现绘的蒙版。洞与装饰全部由 renderMask 用 Path2D 画出来。
+ *
+ * kind 作为判别式(discriminant),让 MaskDef 能是联合类型 ——
+ * 图库里的位图蒙版是另一种 kind,但对外契约一致:
+ * 都是"渲染成一张带透明镂空的画布"。
+ */
+export interface ProcMaskDef {
+  kind: "proc";
   key: string;
   name: string;
   audience: MaskAudience;
@@ -81,6 +89,40 @@ export interface MaskDef {
   hint?: string;
 }
 
+/**
+ * 位图蒙版。图库从 manifest.json 读入(见 maskLibrary.ts 与 SPEC.md)。
+ *
+ * 镂空**已经烘进 PNG 的 alpha 通道**里了,渲染时只做一次 drawImage,
+ * 不再挖洞 —— 所以预览与成片天然像素级一致。
+ */
+export interface ImageMaskDef {
+  kind: "image";
+  key: string;
+  name: string;
+  audience: MaskAudience;
+  /** 图片地址(/masks/xxx.png) */
+  src: string;
+  /** 分类,用于图库顶部的筛选 chips */
+  category: string;
+  /** 搜索关键词 */
+  tags: string[];
+  hint?: string;
+}
+
+/** 蒙版联合类型:代码现绘 + 位图素材。 */
+export type MaskDef = ProcMaskDef | ImageMaskDef;
+
+/** 供 UI 渲染的蒙版卡片元信息(两类蒙版共有字段的交集)。 */
+export interface MaskSummary {
+  key: string;
+  name: string;
+  audience: MaskAudience;
+  kind: MaskDef["kind"];
+  category: string;
+  tags: string[];
+  hint?: string;
+}
+
 const PINK = "#FFD8E1";
 const DEEP = "#1A1A2E";
 const CREAM = "#FFF8EE";
@@ -104,6 +146,7 @@ export const MASKS: MaskDef[] = [
   // ─────────────────────────── 单人 ───────────────────────────
   {
     key: "heart",
+    kind: "proc",
     name: "爱心",
     audience: "single",
     holes: SINGLE_SHAPES.heart(),
@@ -127,6 +170,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "star",
+    kind: "proc",
     name: "星星",
     audience: "single",
     holes: SINGLE_SHAPES.star(),
@@ -144,6 +188,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "flower",
+    kind: "proc",
     name: "花朵",
     audience: "single",
     holes: SINGLE_SHAPES.flower(),
@@ -162,6 +207,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "cat",
+    kind: "proc",
     name: "猫咪",
     audience: "single",
     holes: SINGLE_SHAPES.cat(),
@@ -178,6 +224,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "bear",
+    kind: "proc",
     name: "小熊",
     audience: "single",
     holes: SINGLE_SHAPES.bear(),
@@ -195,6 +242,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "cloud",
+    kind: "proc",
     name: "云朵",
     audience: "single",
     holes: SINGLE_SHAPES.cloud(),
@@ -211,6 +259,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "blob",
+    kind: "proc",
     name: "流体",
     audience: "single",
     holes: SINGLE_SHAPES.blob(),
@@ -227,6 +276,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "burst",
+    kind: "proc",
     name: "爆炸",
     audience: "single",
     holes: SINGLE_SHAPES.burst(),
@@ -244,6 +294,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "ticket",
+    kind: "proc",
     name: "票根",
     audience: "single",
     holes: SINGLE_SHAPES.ticket(),
@@ -264,6 +315,7 @@ export const MASKS: MaskDef[] = [
   // ─────────────────────────── 双人 ───────────────────────────
   {
     key: "dual_circle",
+    kind: "proc",
     name: "双圆",
     audience: "dual",
     holes: DUAL_SHAPES.dual_circle(),
@@ -284,6 +336,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "dual_heart",
+    kind: "proc",
     name: "双心",
     audience: "dual",
     holes: DUAL_SHAPES.dual_heart(),
@@ -302,6 +355,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "dual_star",
+    kind: "proc",
     name: "双星",
     audience: "dual",
     holes: DUAL_SHAPES.dual_star(),
@@ -319,6 +373,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "dual_bubble",
+    kind: "proc",
     name: "气泡",
     audience: "dual",
     holes: DUAL_SHAPES.dual_bubble(),
@@ -337,6 +392,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "dual_blob",
+    kind: "proc",
     name: "双流体",
     audience: "dual",
     holes: DUAL_SHAPES.dual_blob(),
@@ -354,6 +410,7 @@ export const MASKS: MaskDef[] = [
   },
   {
     key: "dual_rounded",
+    kind: "proc",
     name: "双框",
     audience: "dual",
     holes: DUAL_SHAPES.dual_rounded(),
@@ -372,14 +429,35 @@ export const MASKS: MaskDef[] = [
   },
 ];
 
-export const MASKS_BY_KEY: Record<string, MaskDef> = Object.fromEntries(
+export const MASKS_BY_KEY: Record<string, ProcMaskDef> = Object.fromEntries(
   MASKS.map((m) => [m.key, m]),
-);
+) as Record<string, ProcMaskDef>;
 
-export function getMask(key: string | null | undefined): MaskDef | undefined {
-  if (!key) return undefined;
-  return MASKS_BY_KEY[key];
-}
+/**
+ * 内置蒙版的图库元信息。
+ *
+ * 内置蒙版没有素材文件,所以 category 统一归到"内置",
+ * 让图库抽屉能把它们和位图蒙版混排展示(参考图的图库就是混排的)。
+ */
+export const BUILTIN_CATEGORY = "内置";
+
+export const BUILTIN_SUMMARIES: MaskSummary[] = MASKS.map((m) => ({
+  key: m.key,
+  name: m.name,
+  audience: m.audience,
+  kind: "proc",
+  category: BUILTIN_CATEGORY,
+  tags: [m.audience === "dual" ? "双人" : "单人"],
+  hint: m.hint,
+}));
+
+/**
+ * 注意:本文件不再导出 getMask()。
+ * 位图蒙版引入后,"按 key 取蒙版"有两张表要查,统一入口是 maskLibrary.ts 的
+ * getMask()(先内置再图库)。这里若保留同名函数,两者语义不同却同名,
+ * 很容易 import 错对象 —— 且只查内置的那个会静默漏掉图库蒙版。
+ * 只需内置表时请直接用 MASKS_BY[key]。
+ */
 
 /** 贴纸形状路径表,渲染时按需取用。 */
 export { STICKER_SHAPES };

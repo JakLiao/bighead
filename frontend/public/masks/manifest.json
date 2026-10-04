@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "masks": [
+    {
+      "key": "pearl_heart_lilac",
+      "name": "珍珠蕾丝爱心框",
+      "src": "pearl_heart_lilac.png",
+      "audience": "single",
+      "category": "婚礼",
+      "tags": ["珍珠", "爱心", "浪漫", "紫色"],
+      "hint": "把脸放进爱心里"
+    },
+    {
+      "key": "pearl_round_cream",
+      "name": "奶油珍珠圆框",
+      "src": "pearl_round_cream.png",
+      "audience": "single",
+      "category": "婚礼",
+      "tags": ["珍珠", "圆形", "轻奢", "米色"],
+      "hint": "对准圆心"
+    },
+    {
+      "key": "pearl_bow_white",
+      "name": "珍珠蝴蝶结框",
+      "src": "pearl_bow_white.png",
+      "audience": "single",
+      "category": "婚礼",
+      "tags": ["珍珠", "蝴蝶结", "白金"],
+      "hint": "从蝴蝶结下方探出脸"
+    },
+    {
+      "key": "cartoon_speech",
+      "name": "对话气泡框",
+      "src": "cartoon_speech.png",
+      "audience": "single",
+      "category": "卡通",
+      "tags": ["气泡", "ins风", "多彩"],
+      "hint": "把脸放进气泡里"
+    },
+    {
+      "key": "cartoon_flowerwreath",
+      "name": "花环圆框",
+      "src": "cartoon_flowerwreath.png",
+      "audience": "single",
+      "category": "卡通",
+      "tags": ["花环", "圆形", "温柔"],
+      "hint": "脸放进花环中心"
+    },
+    {
+      "key": "cartoon_rainbow",
+      "name": "彩虹幸框",
+      "src": "cartoon_rainbow.png",
+      "audience": "single",
+      "category": "卡通",
+      "tags": ["彩虹", "童趣", "活泼"],
+      "hint": "站到彩虹下面"
+    },
+    {
+      "key": "cartoon_takeout",
+      "name": "外带杯双框",
+      "src": "cartoon_takeout.png",
+      "audience": "dual",
+      "category": "卡通",
+      "tags": ["外带杯", "咖啡", "双人"],
+      "hint": "两个人各站一边"
+    },
+    {
+      "key": "vintage_ticket",
+      "name": "复古票根框",
+      "src": "vintage_ticket.png",
+      "audience": "single",
+      "category": "复古",
+      "tags": ["票根", "复古", "胶片"],
+      "hint": "正面照,别眨眼"
+    }
+  ]
+}

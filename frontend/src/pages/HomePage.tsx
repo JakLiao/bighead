@@ -7,6 +7,8 @@ import { ShutterFlash } from "../components/ShutterFlash";
 import { FilterStrip } from "../components/FilterStrip";
 import { FrameStrip } from "../components/FrameStrip";
 import { MaskStrip } from "../components/MaskStrip";
+import { MaskGallery } from "../components/MaskGallery";
+import { getImageMasks, loadMaskManifest } from "../components/masks/maskLibrary";
 import { fetchMeta } from "../api";
 import type { FilterInfo, FrameInfo } from "../types";
 
@@ -28,6 +30,8 @@ export function HomePage() {
   const setFilterMeta = useStore((s) => s.setFilterMeta);
   const maskKey = useStore((s) => s.maskKey);
   const setMaskKey = useStore((s) => s.setMaskKey);
+  const galleryOpen = useStore((s) => s.maskGalleryOpen);
+  const setGalleryOpen = useStore((s) => s.setMaskGalleryOpen);
   const filterMeta = useStore((s) => s.filterMeta);
   const frameMeta = useStore((s) => s.frameMeta);
 
@@ -40,6 +44,13 @@ export function HomePage() {
   // React 会 bail out 且不重渲染,useEffect([show]) 不重跑,倒计时会
   // 冻结在 1 永不触发 onComplete(表现为"已拍 1/4"卡死)。
   const [snapTick, setSnapTick] = useState(0);
+  // 图库里的蒙版数量(不含内置 15 个),用于入口角标。
+  // 先把 manifest 拉到内存里,这样点开抽屉是即时的,不用等网络。
+  const [galleryCount, setGalleryCount] = useState(0);
+
+  useEffect(() => {
+    loadMaskManifest().then(() => setGalleryCount(getImageMasks().length));
+  }, []);
   // 摄像头拍照能力。通过 ref 显式取用,而不是去读组件的静态属性。
   const camRef = useRef<LiveCameraHandle>(null);
 
@@ -158,7 +169,12 @@ export function HomePage() {
 
       <div className="mt-3">
         <div className="text-xs font-pixel text-brick mb-1">蒙版</div>
-        <MaskStrip selected={maskKey} onSelect={setMaskKey} />
+        <MaskStrip
+          selected={maskKey}
+          onSelect={setMaskKey}
+          galleryCount={galleryCount}
+          onOpenGallery={() => setGalleryOpen(true)}
+        />
       </div>
 
       <div className="mt-3">
@@ -204,6 +220,18 @@ export function HomePage() {
             </div>
           ))}
         </div>
+      )}
+
+      {/* 蒙版图库抽屉:选中即应用并自动收起,让用户立刻回到取景框确认效果 */}
+      {galleryOpen && (
+        <MaskGallery
+          selected={maskKey}
+          onSelect={(k) => {
+            setMaskKey(k);
+            setGalleryOpen(false);
+          }}
+          onClose={() => setGalleryOpen(false)}
+        />
       )}
     </div>
   );

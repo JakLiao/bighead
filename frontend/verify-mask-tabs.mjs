@@ -156,7 +156,17 @@ check("无 pageerror/console error", errors.length === 0, errors.slice(0, 2).joi
 // 截一张标签页 UI
 await page.locator('[data-tab="single"]').click();
 await page.waitForTimeout(400);
-const strip = page.locator('[role="tablist"]').locator("xpath=..");
+// 前面跑完连拍后应用会跳到 /decorate,拍照页已卸载,
+// 截图前先回 /home。用显式测试钩子定位选择条 —— 早期靠 tablist 的
+// 父节点(xpath=..),但蒙版条后来把标签页与「图库」按钮并排放进同一个
+// flex 行,父节点不再等于选择条本身。
+await page.goto(URL, { waitUntil: "networkidle" });
+await page.waitForFunction(() => document.querySelector("video")?.videoWidth > 0, {
+  timeout: 20000,
+});
+await page.locator('[data-tab="single"]').click();
+await page.waitForTimeout(400);
+const strip = page.locator("[data-mask-strip]");
 await strip.screenshot({ path: "mask-tabs.png" });
 
 await browser.close();

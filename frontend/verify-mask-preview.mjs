@@ -148,12 +148,18 @@ if (burn.ok) {
 }
 
 console.log("\n--- 4. 关闭蒙版后应为裸画面 ---");
+// 上一节跑完连拍后应用已跳到 /decorate,拍照页(含 video)已卸载,
+// 直接查 video 会拿到 null。先回 /home 再验证。
+await page.goto(URL, { waitUntil: "networkidle" });
+await page.waitForFunction(() => document.querySelector("video")?.videoWidth > 0, {
+  timeout: 20000,
+});
 await page.getByText("实时蒙版预览").click();
 await page.waitForTimeout(300);
 const off = await page.evaluate(() => {
   const root = [...document.querySelectorAll("div.pointer-events-none")][0];
   const v = document.querySelector("video");
-  return { overlayGone: !root, filter: getComputedStyle(v).filter };
+  return { overlayGone: !root, filter: v ? getComputedStyle(v).filter : "no-video" };
 });
 check("蒙版层已隐藏", off.overlayGone);
 check("滤镜已复位", off.filter === "none", off.filter);
