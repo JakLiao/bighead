@@ -297,14 +297,33 @@ STYLES: dict[str, dict] = {
 # ----------------------------------------------------------------------------
 # 实时滤镜预设(纯 OpenCV,与 AI 无关)
 # ----------------------------------------------------------------------------
+# 每项新增 `css` 字段:同一组 OpenCV 算子在 CSS filter 里的近似映射,
+# 供前端取景框实时预览。它不是装饰性的 —— 拍照瞬间 snap() 会把同一份字符串
+# 交给 `ctx.filter` 烧进成片,所以预览和出片天然一致(所见即所得),
+# 不需要维护两套参数。
+#
+# 映射依据(对照 filters.py 的算子语义):
+#   warmth  -> sepia + saturate。sepia 是浏览器里唯一能"抬 R/G 压 B"的单调算子,
+#              与 _warmth 的 (0.5, 0.45, -0.25) 方向一致。
+#   fade    -> contrast 略降 + brightness 微升,复刻"向白色插值"的褪色观感。
+#   bw      -> grayscale(1) + contrast。
+#   vhs     -> saturate 提升 + hue-rotate 轻微偏色,代替通道错位(CSS 无法表达 roll)。
+#   grain / vignette -> CSS 无对应算子。grain 仅出片由后端加;vignette 由前端
+#              MaskOverlay 叠一层径向渐变还原。故都不写进 css。
 FILTERS: dict[str, dict] = {
-    "none":      {"name": "原片",   "params": {}},
-    "faded_90s": {"name": "90年代", "params": {"warmth": 0.18, "fade": 0.25, "grain": 8,  "vignette": 0.35}},
-    "warm_kodak":{"name": "柯达暖调","params": {"warmth": 0.25, "fade": 0.10, "grain": 5,  "vignette": 0.20}},
-    "bw_classic":{"name": "黑白经典","params": {"bw": True, "contrast": 1.15, "grain": 6, "vignette": 0.30}},
-    "vhs":       {"name": "VHS",    "params": {"vhs": True, "shift": 4, "grain": 10, "vignette": 0.40}},
-    "polaroid":  {"name": "宝丽来", "params": {"warmth": 0.20, "fade": 0.20, "grain": 7, "vignette": 0.45}},
-    "vintage_korean":{"name": "韩式复古","params": {"warmth": 0.12, "fade": 0.15, "grain": 4, "vignette": 0.15}},
+    "none":      {"name": "原片",   "params": {}, "css": ""},
+    "faded_90s": {"name": "90年代", "params": {"warmth": 0.18, "fade": 0.25, "grain": 8,  "vignette": 0.35},
+                  "css": "sepia(0.22) saturate(0.88) contrast(0.92) brightness(1.04)"},
+    "warm_kodak":{"name": "柯达暖调","params": {"warmth": 0.25, "fade": 0.10, "grain": 5,  "vignette": 0.20},
+                  "css": "sepia(0.32) saturate(0.95) contrast(1.02) brightness(1.01)"},
+    "bw_classic":{"name": "黑白经典","params": {"bw": True, "contrast": 1.15, "grain": 6, "vignette": 0.30},
+                  "css": "grayscale(1) contrast(1.15)"},
+    "vhs":       {"name": "VHS",    "params": {"vhs": True, "shift": 4, "grain": 10, "vignette": 0.40},
+                  "css": "saturate(1.25) hue-rotate(-6deg) contrast(1.08)"},
+    "polaroid":  {"name": "宝丽来",  "params": {"warmth": 0.20, "fade": 0.20, "grain": 7,  "vignette": 0.45},
+                  "css": "sepia(0.26) saturate(0.85) contrast(0.9) brightness(1.06)"},
+    "vintage_korean":{"name": "韩式复古","params": {"warmth": 0.12, "fade": 0.15, "grain": 4,  "vignette": 0.15},
+                  "css": "sepia(0.14) saturate(0.9) contrast(0.96) brightness(1.03)"},
 }
 
 # ----------------------------------------------------------------------------

@@ -18,8 +18,26 @@ export interface StyleInfo {
   lora_scale: number;
   faceid_scale: number;
 }
-export interface FilterInfo { key: FilterKey; name: string }
-export interface FrameInfo { key: FrameKey; name: string }
+export interface FilterInfo {
+  key: FilterKey;
+  name: string;
+  /** 与后端 OpenCV 算子近似的 CSS filter 串,取景框实时预览用 */
+  css: string;
+  /** 暗角强度 0..1,由 MaskOverlay 叠径向渐变还原 */
+  vignette: number;
+}
+export interface FrameInfo {
+  key: FrameKey;
+  name: string;
+  /** 相框边距,相对照片短边的像素数 */
+  pad: number;
+  /** 底部额外留白(宝丽来白边),0 表示无 */
+  bottom_pad: number;
+  /** 背景色,或 "checker" 表示棋盘格 */
+  bg: string;
+  /** 底部标题文字 */
+  title: string;
+}
 export interface LayoutInfo { key: LayoutKey; name: string; cols: number; rows: number }
 
 export interface Meta {

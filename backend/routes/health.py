@@ -26,7 +26,25 @@ async def meta():
         styles=[StyleInfo(key=k, name=v["name"], prompt_prefix=v["prompt_prefix"],
                           negative_prompt=v["negative_prompt"], lora_scale=v["lora_scale"],
                           faceid_scale=v["faceid_scale"]) for k, v in STYLES.items()],
-        filters=[FilterInfo(key=k, name=v["name"]) for k, v in FILTERS.items()],
-        frames=[FrameInfo(key=k, name=v["name"]) for k, v in FRAMES.items()],
+        filters=[
+            FilterInfo(
+                key=k,
+                name=v["name"],
+                css=v.get("css", ""),
+                vignette=float(v["params"].get("vignette", 0.0)),
+            )
+            for k, v in FILTERS.items()
+        ],
+        frames=[
+            FrameInfo(
+                key=k,
+                name=v["name"],
+                pad=int(v["params"].get("pad", 0)),
+                bottom_pad=int(v["params"].get("bottom_pad", 0)),
+                bg=str(v["params"].get("bg", "#ffffff")),
+                title=str(v["params"].get("title", "")),
+            )
+            for k, v in FRAMES.items()
+        ],
         layouts=[LayoutInfo(key=k, name=v["name"], cols=v["cols"], rows=v["rows"]) for k, v in LAYOUTS.items()],
     )

@@ -23,6 +23,7 @@ export function DecoratePage() {
   const setAiImages = useStore((s) => s.setAiImages);
   const layoutUrl = useStore((s) => s.layoutUrl);
   const setLayoutUrl = useStore((s) => s.setLayoutUrl);
+  const maskPreview = useStore((s) => s.maskPreview);
   const setCurrentJobId = useStore((s) => s.setCurrentJobId);
   const currentJobId = useStore((s) => s.currentJobId);
 
@@ -33,6 +34,12 @@ export function DecoratePage() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, msg: "" });
   const [error, setError] = useState<string | null>(null);
+  // 相框已在取景阶段烧进照片。本页的"相框"选择改为「额外再套一层」,
+  // 默认 none,即保持所见即所得的结果不变。想换框请回取景页重拍。
+  const [frameOverride, setFrameOverride] = useState<string | null>(null);
+  // 是否需要后端补滤镜:取景已用 CSS 滤镜烧了一份,后端再跑一遍会二次调色。
+  // 因此仅当用户在本页换了滤镜,或相框被烧录时才需要重跑。
+  const burnedIn = maskPreview;
 
   useEffect(() => {
     fetchMeta().then(setMeta).catch(() => {});
@@ -69,8 +76,14 @@ export function DecoratePage() {
     setBusy(true);
     try {
       let blobs = await Promise.all(frames.map(dataUrlToBlob));
-      // 应用实时滤镜(纯 OpenCV,毫秒级)
-      blobs = await Promise.all(blobs.map((b) => applyFilter(b, filter)));
+
+      // 取景阶段已把相框/滤镜烧进照片(所见即所得),所以这里不能再套一层框。
+      // 但滤镜仍需要后端 OpenCV 补 grain/vignette —— CSS 滤镜表达不了噪点,
+      // 且后端算子才是最终质量基准。所以:滤镜照跑,相框只在用户于本页重新
+      // 选了相框时才由后端补画(见下方 frameOverride)。
+      if (!burnedIn) {
+        blobs = await Promise.all(blobs.map((b) => applyFilter(b, filter)));
+      }
 
       // AI 写真
       if (useAi) {
@@ -81,7 +94,7 @@ export function DecoratePage() {
       }
 
       // 普通拼图
-      const result = await makeLayout(blobs, layout, frame);
+      const result = await makeLayout(blobs, layout, frameOverride ?? "none");
       setLayoutUrl(URL.createObjectURL(result));
       setBusy(false);
     } catch (e: any) {
@@ -162,14 +175,17 @@ export function DecoratePage() {
                 <option key={l.key} value={l.key}>{l.name}</option>
               ))}
             </select>
-            <div className="font-pixel text-sm text-brick mb-2">相框</div>
+            <div className="font-pixel text-sm text-brick mb-2">
+              追加相框
+              <span className="ml-1 font-sans text-[10px] text-brown/50">取景已带框</span>
+            </div>
             <div className="grid grid-cols-2 gap-2">
               {meta.frames.map((f) => (
                 <button
                   key={f.key}
-                  onClick={() => setFrame(f.key as any)}
+                  onClick={() => setFrameOverride(f.key)}
                   className={`px-3 py-1.5 rounded-full text-xs border ${
-                    frame === f.key
+                    (frameOverride ?? "none") === f.key
                       ? "bg-brick text-white border-brick"
                       : "bg-cream text-brown border-pink"
                   }`}
@@ -178,6 +194,14 @@ export function DecoratePage() {
                 </button>
               ))}
             </div>
+            {frameOverride && frameOverride !== "none" && (
+              <button
+                onClick={() => setFrameOverride(null)}
+                className="mt-2 text-[10px] text-brown/60 underline hover:text-brick"
+              >
+                移除追加的相框
+              </button>
+            )}
           </div>
 
           {/* 生成按钮 */}

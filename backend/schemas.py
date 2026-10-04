@@ -24,11 +24,22 @@ class StyleInfo(BaseModel):
 class FilterInfo(BaseModel):
     key: str
     name: str
+    # 与后端 OpenCV 算子近似的 CSS filter 串,供取景框实时预览。
+    # 前端拍照时会把同一份字符串交给 ctx.filter,保证预览=成片。
+    css: str = ""
+    # 暗角强度 0..1。CSS filter 表达不了 vignette,由前端叠径向渐变还原。
+    vignette: float = 0.0
 
 
 class FrameInfo(BaseModel):
     key: str
     name: str
+    # 前端画相框蒙版需要的参数,与 layouts._draw_frame 保持同一套语义:
+    # pad/bottom_pad 是相对"照片短边"的像素数,bg 为颜色或 "checker"。
+    pad: int = 0
+    bottom_pad: int = 0
+    bg: str = "#ffffff"
+    title: str = ""
 
 
 class LayoutInfo(BaseModel):

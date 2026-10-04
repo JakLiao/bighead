@@ -1,8 +1,81 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { MaskOverlay } from "./MaskOverlay";
+import { computeFrameGeometry } from "./frameGeometry";
+import { renderMaskLayer } from "./masks/renderMask";
+import { getMask } from "./masks/maskDefs";
+import type { FilterInfo, FrameInfo } from "../types";
 
 interface Props {
   onCapture: (dataUrl: string) => void;
   active: boolean;
+  /** 当前相框参数(null = 无相框)。用于实时蒙版预览与出片合成 */
+  frame?: FrameInfo;
+  /** 当前滤镜参数。css 用于实时预览与 ctx.filter 出片,vignette 用于叠暗角 */
+  filter?: FilterInfo;
+  /** 当前预置蒙版 key。挖形状洞 + 撒贴纸,预览与出片共用同一渲染器 */
+  maskKey?: string;
+  /** 是否叠加取景蒙版 */
+  maskPreview: boolean;
+  /** 是否显示构图引导线 */
+  showGuides: boolean;
+}
+
+/** 相框背景填充到 canvas:纯色或棋盘格,与 frameGeometry.frameBackgroundStyle 同源。 */
+function paintChecker(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+  const cell = Math.max(8, Math.round(Math.min(w, h) / 24));
+  ctx.fillStyle = "#fff0f0";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = "#dcc8c8";
+  for (let cy = y; cy < y + h; cy += cell) {
+    for (let cx = x; cx < x + w; cx += cell) {
+      if ((Math.floor((cx - x) / cell) + Math.floor((cy - y) / cell)) % 2) {
+        ctx.fillRect(cx, cy, Math.min(cell, x + w - cx), Math.min(cell, y + h - cy));
+      }
+    }
+  }
+}
+
+/**
+ * 把"照片 + 相框"合成到目标尺寸的画布。
+ * 与 MaskOverlay 用同一个 computeFrameGeometry,保证预览的框宽 = 成片的框宽。
+ *
+ * @param source 已渲染好滤镜的照片画布
+ */
+function composeFramed(
+  source: HTMLCanvasElement,
+  frame: FrameInfo | undefined,
+): HTMLCanvasElement {
+  const vw = source.width;
+  const vh = source.height;
+  const g = computeFrameGeometry(frame, vw, vh);
+
+  const out = document.createElement("canvas");
+  out.width = g.canvas.w;
+  out.height = g.canvas.h;
+  const ctx = out.getContext("2d");
+  if (!ctx) return out;
+
+  if (g.hasFrame) {
+    if (g.checker) {
+      paintChecker(ctx, 0, 0, out.width, out.height);
+    } else {
+      ctx.fillStyle = frame?.bg ?? "#ffffff";
+      ctx.fillRect(0, 0, out.width, out.height);
+    }
+  }
+
+  // 照片区与源同尺寸(成片只是四周加边),直接 1:1 贴入,不做二次裁切,
+  // 保证取景框里看到的构图就是成片的构图。
+  ctx.drawImage(source, 0, 0, vw, vh, g.photo.x, g.photo.y, g.photo.w, g.photo.h);
+
+  if (g.title) {
+    ctx.fillStyle = g.titleColor;
+    ctx.font = `${Math.max(14, Math.round(out.width * 0.022))}px monospace`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(g.title, out.width / 2, out.height - (out.height - g.photo.y - g.photo.h) / 2);
+  }
+  return out;
 }
 
 type CamState = "idle" | "starting" | "live" | "error";
@@ -29,7 +102,15 @@ function describeError(e: unknown): string | null {
   return msg;
 }
 
-export function LiveCamera({ onCapture, active }: Props) {
+export function LiveCamera({
+  onCapture,
+  active,
+  frame,
+  filter,
+  maskKey,
+  maskPreview,
+  showGuides,
+}: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   // StrictMode 双调用时会自增,用于识别过期的异步结果
@@ -39,6 +120,41 @@ export function LiveCamera({ onCapture, active }: Props) {
   const [state, setState] = useState<CamState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [retryKey, setRetryKey] = useState(0);
+  // 取景容器尺寸,供 MaskOverlay 做像素级相框定位
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  // 预置蒙版的位图。用 img 而不是直接画 canvas,是因为蒙版要盖在 <video> 之上,
+  // 而 video 与 canvas 无法直接叠层 —— 转成 <img> 就能像普通图片一样定位。
+  const [maskUrl, setMaskUrl] = useState<string | null>(null);
+
+  const maskDef = getMask(maskKey);
+
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r) setBox({ w: r.width, h: r.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // 蒙版预览:用真实渲染器按当前取景尺寸出一张图,盖在 video 上。
+  // 尺寸跟随容器,是因为镂空洞的相对大小必须和成片一致。
+  useEffect(() => {
+    if (!maskPreview || !maskDef || box.w <= 0 || box.h <= 0) {
+      setMaskUrl(null);
+      return;
+    }
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const layer = renderMaskLayer(maskDef, Math.round(box.w * dpr), Math.round(box.h * dpr));
+    if (!layer) {
+      setMaskUrl(null);
+      return;
+    }
+    setMaskUrl(layer.toDataURL("image/png"));
+  }, [maskPreview, maskDef, box.w, box.h]);
 
   useEffect(() => {
     if (!active) return;
@@ -132,18 +248,53 @@ export function LiveCamera({ onCapture, active }: Props) {
   function snap(): string | null {
     const v = videoRef.current;
     if (!v || !streamRef.current || v.videoWidth === 0) return null;
-    const c = document.createElement("canvas");
-    c.width = v.videoWidth;
-    c.height = v.videoHeight;
-    const ctx = c.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(v, 0, 0);
-    const url = c.toDataURL("image/jpeg", 0.92);
+
+    // 先把裸帧 + 滤镜画到一张 4:3 画布,再交给 composeFramed 加相框。
+    // ctx.filter 接受的语法与 CSS filter 字符串一致,所以直接复用后端下发的
+    // 同一份 css —— 取景框看到的色调就是成片的色调。
+    const outW = v.videoWidth;
+    const outH = Math.round((v.videoWidth * 3) / 4);
+    const base = document.createElement("canvas");
+    base.width = outW;
+    base.height = outH;
+    const bctx = base.getContext("2d");
+    if (!bctx) return null;
+
+    // 摄像头未必给回请求的 4:3(常见是 16:9)。这里做 cover 裁切而非拉伸,
+    // 等价于页面上 video 的 object-cover,避免脸被拉变形。
+    const srcRatio = v.videoWidth / v.videoHeight;
+    const dstRatio = outW / outH;
+    let sw = v.videoWidth;
+    let sh = v.videoHeight;
+    if (srcRatio > dstRatio) {
+      sw = v.videoHeight * dstRatio;
+    } else {
+      sh = v.videoWidth / dstRatio;
+    }
+    const sx = (v.videoWidth - sw) / 2;
+    const sy = (v.videoHeight - sh) / 2;
+
+    const css = filter?.css ?? "";
+    if (css) bctx.filter = css;
+    bctx.drawImage(v, sx, sy, sw, sh, 0, 0, outW, outH);
+    bctx.filter = "none";
+
+    // 预置蒙版:盖上"挖了洞 + 有贴纸"的图层。洞是透明的,
+    // 所以照片会从人脸形状里透出来 —— 这就是取景框里看到的效果。
+    if (maskPreview && maskDef) {
+      const layer = renderMaskLayer(maskDef, outW, outH);
+      if (layer) bctx.drawImage(layer, 0, 0);
+    }
+
+    const framed = composeFramed(base, frame);
+    const url = framed.toDataURL("image/jpeg", 0.92);
     onCapture(url);
     return url;
   }
 
-  // 把 snap 挂到组件上供外部(连拍逻辑)调用
+  // 把 snap 挂到组件上供外部(连拍逻辑)调用。
+  // snap 闭包捕获了当前的 frame/filter,所以每次渲染都要重新挂,
+  // 否则外部拿到的会是第一次渲染时的旧闭包(切了滤镜也拍不出新色调)。
   useEffect(() => {
     (LiveCamera as unknown as { _snap?: () => string | null })._snap = snap;
   });
@@ -170,15 +321,40 @@ export function LiveCamera({ onCapture, active }: Props) {
   }
 
   return (
-    <div className="relative rounded-3xl overflow-hidden border-4 border-white shadow-2xl bg-deepblue">
+    <div
+      ref={wrapRef}
+      className="relative rounded-3xl overflow-hidden border-4 border-white shadow-2xl bg-deepblue"
+    >
       <video
         ref={attach}
         autoPlay
         playsInline
         muted
         className="w-full aspect-[4/3] object-cover"
-        style={{ transform: "scaleX(-1)" }}
+        style={{
+          transform: "scaleX(-1)",
+          // 取景框实时滤镜。同一份字符串会在 snap() 里交给 ctx.filter 烧进成片,
+          // 所以这里看到的色调就是最终成片的色调。
+          filter: maskPreview ? filter?.css || "none" : "none",
+        }}
       />
+      {maskUrl && (
+        <img
+          src={maskUrl}
+          alt=""
+          className="pointer-events-none absolute inset-0 h-full w-full"
+        />
+      )}
+      {maskPreview && (
+        <MaskOverlay
+          frame={frame}
+          vignette={filter?.vignette ?? 0}
+          showGuides={showGuides}
+          dual={maskDef?.audience === "dual"}
+          containerWidth={box.w}
+          containerHeight={box.h}
+        />
+      )}
       {state !== "live" && (
         <div className="absolute inset-0 flex items-center justify-center text-white/80">
           {state === "error" ? "" : "正在启动摄像头..."}

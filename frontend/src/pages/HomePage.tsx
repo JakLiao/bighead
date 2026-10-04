@@ -5,8 +5,10 @@ import { LiveCamera, snapFromCamera } from "../components/LiveCamera";
 import { CountdownOverlay } from "../components/CountdownOverlay";
 import { ShutterFlash } from "../components/ShutterFlash";
 import { FilterStrip } from "../components/FilterStrip";
+import { FrameStrip } from "../components/FrameStrip";
+import { MaskStrip } from "../components/MaskStrip";
 import { fetchMeta } from "../api";
-import type { FilterInfo } from "../types";
+import type { FilterInfo, FrameInfo } from "../types";
 
 const PHOTO_COUNT = 4;
 
@@ -16,8 +18,21 @@ export function HomePage() {
   const setFrames = useStore((s) => s.setFrames);
   const filter = useStore((s) => s.filter);
   const setFilter = useStore((s) => s.setFilter);
+  const frame = useStore((s) => s.frame);
+  const setFrame = useStore((s) => s.setFrame);
+  const maskPreview = useStore((s) => s.maskPreview);
+  const setMaskPreview = useStore((s) => s.setMaskPreview);
+  const showGuides = useStore((s) => s.showGuides);
+  const setShowGuides = useStore((s) => s.setShowGuides);
+  const setFrameMeta = useStore((s) => s.setFrameMeta);
+  const setFilterMeta = useStore((s) => s.setFilterMeta);
+  const maskKey = useStore((s) => s.maskKey);
+  const setMaskKey = useStore((s) => s.setMaskKey);
+  const filterMeta = useStore((s) => s.filterMeta);
+  const frameMeta = useStore((s) => s.frameMeta);
 
   const [filters, setFilters] = useState<FilterInfo[]>([]);
+  const [frameList, setFrameList] = useState<FrameInfo[]>([]);
   const [capturing, setCapturing] = useState(false);
   const [flash, setFlash] = useState(false);
   // 倒计时触发器:每次自增都会重启 CountdownOverlay 的计时。
@@ -27,8 +42,16 @@ export function HomePage() {
   const [snapTick, setSnapTick] = useState(0);
 
   useEffect(() => {
-    fetchMeta().then((m) => setFilters(m.filters)).catch(() => {});
-  }, []);
+    fetchMeta()
+      .then((m) => {
+        setFilters(m.filters);
+        setFrameList(m.frames);
+        // 缓存完整参数到 store,snap() 出片时要读 filter.css 与 frame.pad
+        setFilterMeta(m.filters);
+        setFrameMeta(m.frames);
+      })
+      .catch(() => {});
+  }, [setFilterMeta, setFrameMeta]);
 
   // 全局键盘:空格 = 拍照
   useEffect(() => {
@@ -91,12 +114,60 @@ export function HomePage() {
 
       <div className="relative">
         {/* 摄像头全程保持挂载:连拍期间反复开关会触发 getUserMedia 竞态与设备抢占 */}
-        <LiveCamera onCapture={() => {}} active={true} />
+        <LiveCamera
+          onCapture={() => {}}
+          active={true}
+          frame={maskPreview ? frameMeta[frame] : undefined}
+          filter={maskPreview ? filterMeta[filter] : undefined}
+          maskKey={maskKey}
+          maskPreview={maskPreview}
+          showGuides={showGuides}
+        />
         <CountdownOverlay tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
       </div>
 
-      <div className="mt-4">
+      {/* 蒙版开关:默认开启,拍前即可见相框/色调/构图引导 */}
+      <div className="mt-4 flex flex-wrap items-center gap-4 text-xs text-brown/70">
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={maskPreview}
+            onChange={(e) => setMaskPreview(e.target.checked)}
+            className="w-4 h-4 accent-brick"
+          />
+          实时蒙版预览
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showGuides}
+            onChange={(e) => setShowGuides(e.target.checked)}
+            className="w-4 h-4 accent-brick"
+          />
+          构图引导线
+        </label>
+        <span className="text-brown/50">
+          {maskPreview ? "所见即所得：拍下即成片" : "已关闭：拍摄原始画面"}
+        </span>
+      </div>
+
+      <div className="mt-3">
+        <div className="text-xs font-pixel text-brick mb-1">蒙版</div>
+        <MaskStrip selected={maskKey} onSelect={setMaskKey} />
+      </div>
+
+      <div className="mt-3">
+        <div className="text-xs font-pixel text-brick mb-1">相框</div>
+        <FrameStrip
+          frames={frameList}
+          selected={frame}
+          onSelect={(k) => setFrame(k as any)}
+        />
+      </div>
+
+      <div className="mt-2">
+        <div className="text-xs font-pixel text-brick mb-1">滤镜</div>
         <FilterStrip filters={filters} selected={filter} onSelect={(k) => setFilter(k as any)} />
       </div>
 

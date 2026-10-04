@@ -16,6 +16,9 @@ frontend/.npmcache/
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 
+# Playwright 验证脚本跑出来的截图(verify-*.mjs 本身入库,产物不入库)
+frontend/*.png
+
 # 模型权重与 HuggingFace 缓存(体积大,不入库)
 # 说明:vendor 下只有 ip_adapter/ 是自研源码,需要入库;
 #       clip_vision/ 与 hf_cache/ 是权重和缓存,可通过 setup 脚本重新获取
