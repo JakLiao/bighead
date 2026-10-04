@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { MaskOverlay } from "./MaskOverlay";
 import { computeFrameGeometry } from "./frameGeometry";
 import { renderMaskLayer } from "./masks/renderMask";
@@ -18,6 +26,20 @@ interface Props {
   maskPreview: boolean;
   /** 是否显示构图引导线 */
   showGuides: boolean;
+}
+
+/**
+ * 父组件通过 ref 拿到的拍照能力。
+ *
+ * 早先这里是把 snap 挂成 LiveCamera._snap 静态属性再由外部反查,那有三个问题:
+ *   · 跨组件耦合 —— 父组件要访问子组件的私有字段,等于把内部实现当公共 API
+ *   · 依赖渲染时机 —— 必须每次渲染都重新挂,否则拿到的是旧闭包(切滤镜拍不出新色调)
+ *   · 无法共存 —— 页面上有两个摄像头实例时会互相覆盖同一个 _snap
+ * useImperativeHandle 让"能拍照"成为显式契约,依赖由 React 自动处理。
+ */
+export interface LiveCameraHandle {
+  /** 抓取当前帧并合成相框/滤镜/蒙版,返回 dataURL;摄像头未出帧时返回 null */
+  snap: () => string | null;
 }
 
 /** 相框背景填充到 canvas:纯色或棋盘格,与 frameGeometry.frameBackgroundStyle 同源。 */
@@ -102,15 +124,18 @@ function describeError(e: unknown): string | null {
   return msg;
 }
 
-export function LiveCamera({
-  onCapture,
-  active,
-  frame,
-  filter,
-  maskKey,
-  maskPreview,
-  showGuides,
-}: Props) {
+export const LiveCamera = forwardRef<LiveCameraHandle, Props>(function LiveCamera(
+  {
+    onCapture,
+    active,
+    frame,
+    filter,
+    maskKey,
+    maskPreview,
+    showGuides,
+  },
+  ref,
+) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   // StrictMode 双调用时会自增,用于识别过期的异步结果
@@ -123,6 +148,9 @@ export function LiveCamera({
   // 取景容器尺寸,供 MaskOverlay 做像素级相框定位
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
+  // 始终指向最新的 snap。这样 useImperativeHandle 只需挂一次,
+  // 闭包过时的问题交给 ref 自身解决,而不是靠"每次渲染重新挂"。
+  const snapRef = useRef<() => string | null>(() => null);
   // 预置蒙版的位图。用 img 而不是直接画 canvas,是因为蒙版要盖在 <video> 之上,
   // 而 video 与 canvas 无法直接叠层 —— 转成 <img> 就能像普通图片一样定位。
   const [maskUrl, setMaskUrl] = useState<string | null>(null);
@@ -248,7 +276,6 @@ export function LiveCamera({
   function snap(): string | null {
     const v = videoRef.current;
     if (!v || !streamRef.current || v.videoWidth === 0) return null;
-
     // 先把裸帧 + 滤镜画到一张 4:3 画布,再交给 composeFramed 加相框。
     // ctx.filter 接受的语法与 CSS filter 字符串一致,所以直接复用后端下发的
     // 同一份 css —— 取景框看到的色调就是成片的色调。
@@ -292,12 +319,22 @@ export function LiveCamera({
     return url;
   }
 
-  // 把 snap 挂到组件上供外部(连拍逻辑)调用。
-  // snap 闭包捕获了当前的 frame/filter,所以每次渲染都要重新挂,
-  // 否则外部拿到的会是第一次渲染时的旧闭包(切了滤镜也拍不出新色调)。
-  useEffect(() => {
-    (LiveCamera as unknown as { _snap?: () => string | null })._snap = snap;
+  // 每次渲染把最新 snap 存进 ref,供 useImperativeHandle 转发。
+  // 写在 useLayoutEffect 里而不是渲染体内,避免在渲染阶段改 ref
+  // 带来的副作用警告,同时也保证父组件在 commit 后能立刻调到最新实现。
+  useLayoutEffect(() => {
+    snapRef.current = snap;
   });
+
+  // 把拍照能力暴露给父组件。依赖数组交给 React 自动比对,
+  // 切滤镜/相框/蒙版时会自动拿到最新闭包,不需要手动"每次渲染重新挂"。
+  useImperativeHandle(
+    ref,
+    () => ({
+      snap: () => snapRef.current(),
+    }),
+    [],
+  );
 
   if (state === "error" && error) {
     return (
@@ -362,8 +399,4 @@ export function LiveCamera({
       )}
     </div>
   );
-}
-
-export function snapFromCamera(): string | null {
-  return (LiveCamera as unknown as { _snap?: () => string | null })._snap?.() ?? null;
-}
+});

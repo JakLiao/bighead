@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore } from "../store";
-import { LiveCamera, snapFromCamera } from "../components/LiveCamera";
+import { LiveCamera, type LiveCameraHandle } from "../components/LiveCamera";
 import { CountdownOverlay } from "../components/CountdownOverlay";
 import { ShutterFlash } from "../components/ShutterFlash";
 import { FilterStrip } from "../components/FilterStrip";
@@ -40,6 +40,8 @@ export function HomePage() {
   // React 会 bail out 且不重渲染,useEffect([show]) 不重跑,倒计时会
   // 冻结在 1 永不触发 onComplete(表现为"已拍 1/4"卡死)。
   const [snapTick, setSnapTick] = useState(0);
+  // 摄像头拍照能力。通过 ref 显式取用,而不是去读组件的静态属性。
+  const camRef = useRef<LiveCameraHandle>(null);
 
   useEffect(() => {
     fetchMeta()
@@ -74,7 +76,8 @@ export function HomePage() {
   }
 
   function doSnap() {
-    const url = snapFromCamera();
+    // ref 在整个挂载周期内稳定,连拍计时器闭包捕获它不会拿到过期引用。
+    const url = camRef.current?.snap() ?? null;
     if (!url) {
       // 摄像头还没出帧(videoWidth === 0)。这里必须继续排下一轮倒计时,
       // 否则整个连拍会永久停住 —— 用户只能刷新页面。
@@ -115,6 +118,7 @@ export function HomePage() {
       <div className="relative">
         {/* 摄像头全程保持挂载:连拍期间反复开关会触发 getUserMedia 竞态与设备抢占 */}
         <LiveCamera
+          ref={camRef}
           onCapture={() => {}}
           active={true}
           frame={maskPreview ? frameMeta[frame] : undefined}

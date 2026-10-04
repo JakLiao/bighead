@@ -97,10 +97,11 @@ check("柯达暖调含 sepia", /sepia/.test(koda), koda);
 console.log("\n--- 3. 出片是否真的烧录(所见即所得) ---");
 /**
  * 走真实拍照流程(空格连拍),再从 store 取成片解码统计像素。
- * 早先这里用动态 import 去拿 LiveCamera 的 snap,但那会得到**另一个模块实例**,
- * _snap 实际挂在 React 使用的那份模块上,于是恒为 null —— 是测试方法的问题,
- * 不是功能的问题。改用真实 UI 流程后覆盖的是完整链路。
+ * 这条链路会经过 ref 改造后的 camRef.current.snap(),端到端覆盖更完整。
+ * 注意:蒙版已分标签页,「无」选项要先切到对应标签页才存在。
  */
+await page.locator('[data-tab="none"]').click();
+await page.waitForTimeout(250);
 await page.locator('[data-mask="none"]').click();
 await page.waitForTimeout(300);
 await page.evaluate(() => window.__store.getState().setFrames([]));

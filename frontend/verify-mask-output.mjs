@@ -85,7 +85,15 @@ for (const g of res.geom) {
 }
 
 console.log("\n--- 3. 预览 <img> 已挂载且随蒙版切换 ---");
-for (const key of ["heart", "dual_circle", "bear"]) {
+// 蒙版已改为按人数分标签页,所以要先切到对应标签页,按钮才存在。
+// 直接点 [data-mask=...] 在标签页外会 timeout —— 这点容易被漏掉。
+for (const [key, tab] of [
+  ["heart", "single"],
+  ["dual_circle", "dual"],
+  ["bear", "single"],
+]) {
+  await page.locator(`[data-tab="${tab}"]`).click();
+  await page.waitForTimeout(250);
   await page.locator(`[data-mask="${key}"]`).click();
   await page.waitForTimeout(450);
   const info = await page.evaluate(() => {
@@ -98,9 +106,11 @@ for (const key of ["heart", "dual_circle", "bear"]) {
 }
 
 console.log("\n--- 4. 走真实拍照流程,验证出片真的烧录了蒙版 ---");
-// 不能用动态 import 拿 snap():那会得到另一个模块实例,_snap 挂在
-// React 实际使用的那份模块上。这里改为触发真实 UI(空格连拍),
-// 再从 store 里取真正的成片 —— 端到端覆盖整条链路。
+// 这条路径同时覆盖 ref 改造后的拍照链路:空格 -> CountdownOverlay -> doSnap
+// -> camRef.current.snap()。早先这里用动态 import 拿 snap(),会得到另一个模块
+// 实例而恒为 null,现已改为走真实 UI。
+await page.locator('[data-tab="single"]').click();
+await page.waitForTimeout(250);
 await page.locator('[data-mask="heart"]').click();
 await page.waitForTimeout(400);
 
