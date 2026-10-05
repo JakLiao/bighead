@@ -239,7 +239,7 @@ export function HomePage() {
         <CountdownOverlay tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
         <PoseHint
-          pose={POSES[(retakeIdx ?? frames.length) % POSES.length]}
+          pose={POSES[frames.length % POSES.length]}
           visible={showPose && capturing}
         />
         {retakeIdx !== null && (
