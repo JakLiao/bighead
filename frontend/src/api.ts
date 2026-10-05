@@ -28,13 +28,18 @@ export async function applyFilter(
   return r.blob();
 }
 
+/**
+ * 把已经烧好滤镜/年代的成片原样落盘。
+ *
+ * 刻意不接受 era: 落盘字节必须是调用方烧好的最终成片, era 算子非幂等,
+ * 在这里再烧一遍会叠加(低分辨率再糊一次、漏光再抬一次)。
+ * era 由 applyFilter 在上传前就烧进 blob —— 见 DecoratePage.doLayout。
+ */
 export async function saveCaptures(
   blobs: Blob[],
-  era: EraKey = "modern",
 ): Promise<{ job_id: string; count: number }> {
   const fd = new FormData();
   blobs.forEach((b, i) => fd.append("images", b, `photo_${i + 1}.jpg`));
-  fd.append("era", era);
   const r = await fetch(`${API}/capture/save`, { method: "POST", body: fd });
   if (!r.ok) throw new Error("save failed");
   return r.json();

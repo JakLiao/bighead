@@ -55,5 +55,5 @@ async def meta():
             for k, v in FRAMES.items()
         ],
         layouts=[LayoutInfo(key=k, name=v["name"], cols=v["cols"], rows=v["rows"]) for k, v in LAYOUTS.items()],
-        era_presets=[EraInfo(key=k, name=v) for k, v in ERA_PRESETS.items()],
+        era_presets=[EraInfo(key=k, name=v["name"]) for k, v in ERA_PRESETS.items()],
     )

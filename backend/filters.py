@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from .config import ERA_DEFAULT, FILTERS
+from .config import ERA_DEFAULT, ERA_PRESETS, FILTERS
 
 
 def _pil_to_bgr(pil: Image.Image) -> np.ndarray:
@@ -112,45 +112,68 @@ def _vhs(bgr: np.ndarray, shift: int) -> np.ndarray:
     return out
 
 
-def _era_modern_pixels(bgr: np.ndarray) -> np.ndarray:
+def _era_modern_pixels(bgr: np.ndarray, params: dict) -> np.ndarray:
     """modern 是恒等函数: 不动任何像素.
 
     刻意保留成一个显式的空操作, 而不是让调用方写 `if era != "modern"` ——
-    这样 apply_filter 里era 的调用路径恒定, 新增 era 时不必回头改所有分支。
+    这样 apply_filter 里 era 的调用路径恒定, 新增 era 时不必回头改所有分支。
+
+    `params` 收下但不用: modern 的可调空间就是"什么都不做", 没有参数可调。
+    签名仍与其它算子一致, 是为了让 ERA_OPS 里的算子可以被同一种方式调用。
     """
     return bgr
 
 
-def _era_vintage_2000_pixels(bgr: np.ndarray) -> np.ndarray:
+def _era_vintage_2000_pixels(bgr: np.ndarray, params: dict) -> np.ndarray:
     """古早画质: 复刻 2000 年 CCD 大头贴机的视觉特征.
 
-    三步顺序执行, 后一步覆盖前一步:
-      1. 下采到 ~480p 再用最近邻上采回原尺寸 —— CCD 时代的低分辨率观感,
-         皮肤细节在此过程中被自然平滑(这是"糊"得对的关键, 不是加模糊)。
-      2. 顶部 1/4 加暖色漏光 —— 模拟机器内置闪光灯打在顶部的暖光溢出。
+    三步顺序执行, 后一步覆盖前一步。所有可调项都从 `params` 读
+    (见 config.ERA_PRESETS["vintage_2000"]["params"]), 函数体内不写死魔数:
+      1. 下采到 short_edge 再上采回原尺寸 —— CCD 时代的低分辨率观感。
+      2. 顶部暖色漏光, 强度沿高度线性衰减。
       3. posterize(每通道清掉最低位) —— 模拟浅色阶的断层。
 
-    注意: 目标短边用 min(h, w) 推算而不是写死 640x480, 因为 layout 出来的
+    关于上采样插值(原先这里是 INTER_NEAREST, 是本函数的实现错误):
+    最近邻上采样**不产生任何平滑**, 它把每个源像素原样复制成一个硬边方块,
+    观感是马赛克/锯齿, 与"CCD 低分辨率"要的方向正好相反 —— docstring 里
+    "皮肤细节在此过程中被自然平滑"对 INTER_NEAREST 而言是**不成立的**。
+    真正让细节被抹平的是第一步的 INTER_AREA 下采样(面积平均, 本身就是
+    低通滤波); 上采样用 INTER_LINEAR 只是把方块边界补成平滑过渡, 不额外
+    引入锐化或噪点。
+
+    目标短边用 min(h, w) 推算而不是写死 640x480, 因为 layout 出来的
     成片尺寸不固定(6寸相纸是 1500x1000), 写死会把非 4:3 的图拉变形。
     """
     h, w = bgr.shape[:2]
-    short = min(h, w)
-    scale = 480 / short
+    short_edge = float(params.get("short_edge", 480))
+    scale = short_edge / min(h, w)
     nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
     small = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
-    out = cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
+    out = cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
-    # 顶部 1/4 暖色漏光: R +30, G +10, B 不动。用 int16 累加避免 uint8 溢出回绕。
-    band = out[: max(1, h // 4), :, :].astype(np.int16)
-    band[..., 2] += 30  # R in BGR
-    band[..., 1] += 10  # G
-    out[: max(1, h // 4), :, :] = np.clip(band, 0, 255).astype(np.uint8)
+    # 顶部暖色漏光: 沿高度从 leak_r/leak_g 线性衰减到 0, 只抬 R/G, B 不动
+    # (R+G 才是暖黄, 只抬 R 会发红)。用 float32 累加避免 uint8 溢出回绕。
+    #
+    # 为什么是渐变而不是"顶部 1/4 加常数"(原实现): 常数加法在 leak_band
+    # 的下边界留下一条**横向硬边** —— 上一行比下一行突然亮 30 个色阶,
+    # 在 1500x1000 的成片上是一条肉眼可见的直线。linspace 的 endpoint=True
+    # 让带底恰好落到 0, 与带外首行连续, 硬边从根上消失。
+    leak_h = max(1, int(round(h * float(params.get("leak_ratio", 0.5)))))
+    ramp = np.linspace(1.0, 0.0, leak_h, dtype=np.float32)[:, None]
+    band = out[:leak_h, :, :].astype(np.float32)
+    band[..., 2] += float(params.get("leak_r", 40)) * ramp  # R in BGR
+    band[..., 1] += float(params.get("leak_g", 14)) * ramp  # G
+    out[:leak_h, :, :] = np.clip(band, 0, 255).astype(np.uint8)
 
     # posterize: 清掉每通道最低位 -> 相邻灰阶坍缩, 出现色阶断层
     return (out >> 1) << 1
 
 
 # era key -> 像素算子。新增 era 时只改这张表, 调用方无需改动。
+# 约定: 算子统一签名为 (bgr, params) -> bgr, params 由 _apply_era 从
+# config.ERA_PRESETS[era]["params"] 取。本表与 ERA_PRESETS 的 key 必须完全
+# 一致 —— verify_era.py 有一条断言专门守这个不变量(加了一边忘了另一边时,
+# 该 era 会在 /api/meta 里露脸却静默不生效)。
 ERA_OPS = {
     "modern": _era_modern_pixels,
     "vintage_2000": _era_vintage_2000_pixels,
@@ -158,11 +181,17 @@ ERA_OPS = {
 
 
 def _apply_era(bgr: np.ndarray, era: str) -> np.ndarray:
-    """按 era 名取算子并作用。未知 era 交给调用方校验, 这里只做兜底。"""
+    """按 era 名取算子并作用。未知 era 交给调用方校验, 这里只做兜底。
+
+    两张表任一缺该 key 都退化成"原样返回"而不是抛异常: era 已经过
+    /api/preview/filter 的 ERA_KEYS 校验, 走到这里说明是内部调用方传错,
+    静默不生效比让整个成片请求 500 更好排查(症状是"选了没效果")。
+    """
     op = ERA_OPS.get(era)
-    if op is None:
+    spec = ERA_PRESETS.get(era)
+    if op is None or spec is None:
         return bgr
-    return op(bgr)
+    return op(bgr, spec["params"])
 
 
 def apply_filter(

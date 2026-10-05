@@ -822,3 +822,109 @@ eslint src                                 → 0 error, 1 warning（既有, Coun
   「预览=出片」契约的成本收益不划算。
 - **`era` 不进 AI 提示词**。AI 写真走的是模型重绘，era 只作用于
   `/api/preview/filter` 与落盘，不影响 prompt 构造。
+
+---
+
+# Task 1 复审：修复 2078b49 的 6 处问题（2026-10-05，分支 feature/p0-vintage-parity）
+
+复审对象是 `2078b49 feat: era preset (modern | vintage_2000)`。功能是对的，
+但有 1 处死代码、2 处 docstring 事实错误、2 处实现与文档不符、1 处参数埋死。
+
+## 1. `capture.py` 的 era 分支是死代码，且留着会双烧（严重）
+
+`/api/capture/save` 接收 `era: str = Form(ERA_DEFAULT)` 并在落盘时烧 era。
+但前端 [DecoratePage.tsx](file:///f:/Trae-work/bighead/frontend/src/pages/DecoratePage.tsx#L278)
+调 `saveCaptures(finalBlobs)` **不传 era**，而 era 早在同函数上一段就被
+`applyFilter(b, preset, era)` 烧进 `finalBlobs` 了。
+
+于是这条分支的前端可达性恒为 0：`era` 恒等于 `ERA_DEFAULT`，
+`if era != ERA_DEFAULT` 永不成立。它属于「看起来能跑、实际从没生效」的代码 ——
+更糟的是它一旦被接通就是**双烧**：era 算子非幂等（下采样再糊一次、
+漏光再抬一次、色阶再砍一次），成片会「糊上加糊」。
+
+`api.ts` 的 `era: EraKey = "modern"` 形参是同一根因的另一半：形参存在但
+唯一的调用点不传，读者会以为 era 是在这里烧的。两处一起删。
+
+**顺带修正 docstring 的事实错误**：原注释写「era 在这里烧进落盘的像素，
+之后再改年代只能重拍，所以必须在存的时候就定死」——因果说反了。
+era 在**上传前**就烧好了，落盘时的字节就是最终字节。
+
+## 2. 上采样用 `INTER_NEAREST` 与 docstring 的说法自相矛盾
+
+原 docstring 写「下采到 ~480p 再用最近邻上采回原尺寸 …… 皮肤细节在此
+过程中被自然平滑（这是"糊"得对的关键）」。
+
+**这句里的「自然平滑」对 `INTER_NEAREST` 而言不成立**：最近邻把每个源像素
+原样复制成硬边方块，产出的观感是马赛克/锯齿，与「CCD 低分辨率」方向相反。
+真正做低通的是第一步的 `INTER_AREA`（面积平均本身就是低通滤波）。
+所以这是一句**描述了不存在的行为**的注释 —— 读代码的人会以为平滑是
+设计意图，从而不敢改插值。上采样改 `INTER_LINEAR`，docstring 补上
+「为什么是线性、谁负责平滑」。
+
+## 3. 顶部漏光的常数加法在带底留了一条硬边
+
+原实现 `out[:h//4] += 30 / += 10` 是**常数**加法，带底那一行与带外
+第一行相差约 30 个色阶 —— 在 1500x1000 的成片上是一条肉眼可见的横线。
+改成 `np.linspace(1.0, 0.0, leak_h)` 沿高度线性衰减到 0（`endpoint=True`
+保证带底恰好落在 0，与带外连续）。`leak_ratio` 相应从 0.25 提到 0.5，
+让衰减尾巴拖到画面中线，同时顶部 1/4 的均值仍稳定超过 20 个色阶
+（实测 dR=29.0，断言阈值 >20 有余量）。
+
+## 4. era 参数埋在函数体里，无法调参
+
+`short_edge=480` / `leak_r=30` / `leak_g=10` 原本是函数体内的字面量。
+这些是纯美术手感参数，改一次要动代码。已外置到
+`config.ERA_PRESETS[key]["params"]`（结构与 `FILTERS`/`FRAMES` 对齐），
+算子签名统一为 `(bgr, params)`，由 `_apply_era` 注入。
+连带 `health.py` 的 `/api/meta` 从 `name=v` 改为 `name=v["name"]`。
+
+> 注意：改成嵌套 dict 后 `/api/meta` 若忘了改 `v` → `v["name"]`，
+> 会把整个 python dict 塞进 `EraInfo.name` 并被 pydantic 拒掉。已加断言钉住。
+
+## 5. `ERA_OPS` 与 `ERA_PRESETS` 两张表没有任何同步机制
+
+两张表分居 `filters`（算子实现）与 `config`（参数/展示名），只加一边时
+症状是「新 era 在 `/api/meta` 里露脸，选了却毫无效果」——因为 `_apply_era`
+在任一表缺失时都静默返回原图。已补 `set(ERA_OPS) == set(ERA_PRESETS)`
+断言，并额外断言「顺序一致」「每个 key 都能跑通 `apply_filter`」
+「非默认 era 真的改变像素」（防止又一个「存在但没接线」的空壳）。
+
+## 6. verify_era.py 自身修掉的 3 个假断言
+
+改实现时暴露出旧断言里 3 处「看起来在测 A、实际测的是 B 或恒真」：
+
+| 坑 | 现象 | 真因 | 修法 |
+| --- | --- | --- | --- |
+| posterize 色阶数 | 漏光改渐变后从 3 级涨到 21 级，断言挂了 | `len(uniq) <= 4` 隐含依赖「漏光是常数」（纯色图 + 常数带 = 3 级），渐变带每行一级 | 换一张 256 级渐变图、并关掉漏光，只量 posterize 自己的贡献（256→128） |
+| 插值判据恒假 | 「与最近邻不同」失败 | 用 480x640 做样本，短边正好 = `short_edge` → `scale=1.0` **根本不缩放**，两种插值都退化成恒等 | 换 1000x1500（6寸相纸真实尺寸），顺带覆盖非 4:3 |
+| 参照系漏了漏光 | 「与线性复刻版一致」失败 | 参照实现只复刻了 resize，而实际输出还叠了渐变漏光 | 比对时 `{**VINTAGE, "leak_r": 0, "leak_g": 0}` 关掉漏光，只比「重采样」这一段 |
+
+> 第 2 条值得单独记：`short_edge` 恰好等于图短边时，缩放比例是 1.0，
+> 整条重采样链路退化成 no-op —— 这类「参数与样本尺寸撞车」导致的恒真断言，
+> 靠读代码看不出来，只有把两个插值版本都比一遍才会暴露。
+
+## 7. 门禁结果
+
+```
+ruff check backend scripts                → All checks passed!
+compileall -q backend scripts              → exit 0
+verify_era.py                              → 64 passed, 0 failed (exit 0)
+tsc -b --force                             → exit 0
+eslint src                                 → 0 error, 1 warning（既有, CountdownOverlay）
+```
+
+> eslint 那条 warning 在 [CountdownOverlay.tsx](file:///f:/Trae-work/bighead/frontend/src/components/CountdownOverlay.tsx#L39)，
+> 与本次改动无关。运行时末尾的 `TRAE Sandbox Error: hit restricted` 是
+> npm 想写 `E:\nodejs\node_cache\_logs` 被拦，不影响 tsc/eslint 的判定。
+
+## 8. 已知遗留
+
+- **仍未跑 8 个 Playwright 端到端回归**。本次把 era 从落盘路径移到
+  「上传前烧好」，`DecoratePage` 的 `finalBlobs` 计算逻辑未变
+  （仍是 `needFilter || needEra`），但 `/api/capture/save` 的签名变了
+  （少了 Form 字段）。该路由的字节级行为由 verify_era.py 的
+  「原样落盘」断言覆盖，但连拍→落盘→AI 的完整链路仍建议手工点一次。
+- **`leak_ratio` 0.5 / `leak_r` 40 这组值是按断言阈值反推的**，不是
+  肉眼看图定的。真实观感建议出图后人工确认一次；调整只需改 config，
+  不必再动 `filters.py`。
+

@@ -333,11 +333,35 @@ FILTERS: dict[str, dict] = {
 # vintage_2000,反之亦然。所以这里不往 FILTERS 里塞 per-filter 的 era 字段 ——
 # 那样的字段取值恒为默认的 modern, 是永远读不到的死字段。
 #
-# modern  : 恒等(identity),不动像素。
+# 结构与 FILTERS/FRAMES 对齐: {"name": 展示名, "params": 算子参数}。
+# 把参数外置到这里的理由: era 算子的"手感"(短边目标、漏光强度/范围)本质是
+# 美术调参, 埋在 filters.py 的函数体里就只能改代码重跑才能试。
+# filters.ERA_OPS 里的算子统一按 (bgr, params) 接收, 新增 era 只需在两处
+# 各加一行(本表 + 那张表), 算子本体不感知 era 的存在。
+#
+# modern  : 恒等(identity),不动像素。params 为空 —— 没有可调的东西。
 # vintage_2000: 模拟 2000 年 CCD 大头贴机 —— 低分辨率 + 顶部漏光 + 色阶断层。
-ERA_PRESETS: dict[str, str] = {
-    "modern": "现代高清",
-    "vintage_2000": "古早画质",
+ERA_PRESETS: dict[str, dict] = {
+    "modern": {"name": "现代高清", "params": {}},
+    "vintage_2000": {
+        "name": "古早画质",
+        "params": {
+            # 下采样目标短边。CCD 时代的有效分辨率就这么高, 皮肤细节在这个
+            # 往返里被自然抹平(是"糊得对", 不是加模糊)。用短边而非固定
+            # 640x480 是因为 layout 出来的成片尺寸不固定(6寸相纸 1500x1000)。
+            "short_edge": 480,
+            # 顶部漏光覆盖的高度比例。取 0.5 而非 0.25: 漏光是从画面顶端
+            # 向外溢出的衰减, 铺满上半幅才能在顶部 1/4 拿到足够均值,
+            # 同时让衰减尾巴拖到画面中线, 不留可见的横向硬边。
+            "leak_ratio": 0.5,
+            # 漏光在**顶端**的峰值强度(第 0 行), 沿高度线性衰减到 leak_ratio
+            # 处归零。R 抬得比 G 多但 G 也参与(R+G 才是暖黄, 只抬 R 会发红);
+            # B 不动。峰值高于顶部 1/4 的均值, 是为了补偿线性衰减后
+            # 顶部 1/4 的平均增温仍能稳定超过 20 个色阶。
+            "leak_r": 40,
+            "leak_g": 14,
+        },
+    },
 }
 ERA_DEFAULT: str = "modern"
 ERA_KEYS: list[str] = list(ERA_PRESETS.keys())

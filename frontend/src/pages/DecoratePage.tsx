@@ -272,8 +272,8 @@ export function DecoratePage() {
 
       // AI 写真
       if (useAi) {
-        // era 传 "modern": 上面 applyFilter 已经把它烧进 finalBlobs 了。
-        // 再传一次会在 /api/capture/save 里叠第二遍(低分辨率+漏光会翻倍),
+        // 不传 era: 上面 applyFilter 已经把它烧进 finalBlobs 了。
+        // era 算子非幂等, 再传一次会叠第二遍(低分辨率+漏光会翻倍),
         // 而 AI 生成是异步长任务, 这种错误要等 30s 后才看得出来。
         const cap = await saveCaptures(finalBlobs);
         // 先发起生成再订阅: 反过来(先 setCurrentJobId 再 await start)的话,

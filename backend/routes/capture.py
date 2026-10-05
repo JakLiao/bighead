@@ -1,14 +1,12 @@
 """保存连拍原图到 outputs/{job_id}/photo_{i}.jpg."""
 from __future__ import annotations
 
-import asyncio
 import io
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from PIL import Image
 
-from ..config import ERA_DEFAULT, ERA_KEYS, OUTPUT_DIR, PHOTO_FILENAME
-from ..filters import apply_filter_bytes
+from ..config import OUTPUT_DIR, PHOTO_FILENAME
 from ..jobs import new_job
 
 router = APIRouter()
@@ -40,18 +38,21 @@ def _check_image(data: bytes, content_type: str | None) -> None:
 
 
 @router.post("/api/capture/save")
-async def capture_save(
-    images: list[UploadFile] = File(...),
-    era: str = Form(ERA_DEFAULT),
-):
+async def capture_save(images: list[UploadFile] = File(...)):
     """保存连拍原图到 outputs/{job_id}/photo_{i}.jpg.
 
-    era 在这里烧进落盘的像素: 这批图是 AI 写真与画廊的**源**, 之后再改
-    年代只能重拍, 所以必须在存的时候就定死。只有 era != modern 才解码重编码,
-    modern 走原样落盘(不引入二次 JPEG 损失)。
+    **刻意不接受 era 参数**: 落盘的像素必须是调用方已经烧好的成片。
+    前端 DecoratePage 在上传前就已经把 preset 与 era 一起走
+    /api/preview/filter 烧进了 finalBlobs(见 DecoratePage.doLayout),
+    这里再烧一次 era 会**叠两遍** —— era 算子不是幂等的: 低分辨率上采样
+    会再糊一次、漏光会再抬一次、色阶会再砍一次, 结果是"糊上加糊"。
+    保留这个 Form 字段时它还是一个静默的陷阱: 前端不传就恒为 ERA_DEFAULT,
+    于是这条分支永远不执行, 看起来能跑、实际 era 从来没在这里生效过,
+    而 docstring 里的"必须在存的时候就定死"又恰好说反了因果。
+
+    所以现在只有一条路: 收到的字节就是最终字节, 原样 write_bytes,
+    不解码不重编码 —— 顺带也就不再引入二次 JPEG 损失。
     """
-    if era not in ERA_KEYS:
-        raise HTTPException(400, f"unknown era preset: {era}")
     if not images:
         raise HTTPException(400, "没有收到图片")
     if len(images) > MAX_PHOTOS:
@@ -72,12 +73,6 @@ async def capture_save(
                 )
         data = bytes(buf)
         _check_image(data, up.content_type)
-        # 只烧 era 不烧 preset: preset 由取景页拍照那一刻烧进 burnedIn 快照
-        # (或由 DecoratePage 补滤镜时烧), 这里再烧一次会叠加两遍。
-        # 用 to_thread 把这段 CPU 密集的 OpenCV 挪出事件循环 —— handler 是
-        # async, 直接调会卡住整个服务(见 preview.py 的同类说明)。
-        if era != ERA_DEFAULT:
-            data = await asyncio.to_thread(apply_filter_bytes, data, "none", era)
         path = job_dir / PHOTO_FILENAME.format(idx=i + 1)
         path.write_bytes(data)
         saved.append(f"/outputs/{job_id}/{path.name}")
