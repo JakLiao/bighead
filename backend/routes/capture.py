@@ -1,12 +1,14 @@
 """保存连拍原图到 outputs/{job_id}/photo_{i}.jpg."""
 from __future__ import annotations
 
+import asyncio
 import io
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from PIL import Image
 
-from ..config import OUTPUT_DIR, PHOTO_FILENAME
+from ..config import ERA_DEFAULT, ERA_KEYS, OUTPUT_DIR, PHOTO_FILENAME
+from ..filters import apply_filter_bytes
 from ..jobs import new_job
 
 router = APIRouter()
@@ -38,7 +40,18 @@ def _check_image(data: bytes, content_type: str | None) -> None:
 
 
 @router.post("/api/capture/save")
-async def capture_save(images: list[UploadFile] = File(...)):
+async def capture_save(
+    images: list[UploadFile] = File(...),
+    era: str = Form(ERA_DEFAULT),
+):
+    """保存连拍原图到 outputs/{job_id}/photo_{i}.jpg.
+
+    era 在这里烧进落盘的像素: 这批图是 AI 写真与画廊的**源**, 之后再改
+    年代只能重拍, 所以必须在存的时候就定死。只有 era != modern 才解码重编码,
+    modern 走原样落盘(不引入二次 JPEG 损失)。
+    """
+    if era not in ERA_KEYS:
+        raise HTTPException(400, f"unknown era preset: {era}")
     if not images:
         raise HTTPException(400, "没有收到图片")
     if len(images) > MAX_PHOTOS:
@@ -59,6 +72,12 @@ async def capture_save(images: list[UploadFile] = File(...)):
                 )
         data = bytes(buf)
         _check_image(data, up.content_type)
+        # 只烧 era 不烧 preset: preset 由取景页拍照那一刻烧进 burnedIn 快照
+        # (或由 DecoratePage 补滤镜时烧), 这里再烧一次会叠加两遍。
+        # 用 to_thread 把这段 CPU 密集的 OpenCV 挪出事件循环 —— handler 是
+        # async, 直接调会卡住整个服务(见 preview.py 的同类说明)。
+        if era != ERA_DEFAULT:
+            data = await asyncio.to_thread(apply_filter_bytes, data, "none", era)
         path = job_dir / PHOTO_FILENAME.format(idx=i + 1)
         path.write_bytes(data)
         saved.append(f"/outputs/{job_id}/{path.name}")

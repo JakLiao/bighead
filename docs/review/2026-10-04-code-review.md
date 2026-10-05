@@ -741,3 +741,84 @@ node verify-camera.mjs
 跑这些脚本时终端会报 `TRAE Sandbox Error: hit restricted`（Chrome 想写
 `NVIDIA\DXCache` 与字体缓存被拦）。**这不影响测试结果** —— 每个脚本自身的
 `PASS/FAIL` 计数与退出码都是正确的（均为 0）。
+
+---
+
+# Task 1：古早画质预设 `era`（2026-10-05，分支 feature/p0-vintage-parity）
+
+## 1. 计划与现有代码的 5 处冲突（先读后改，全部已按现有代码修正）
+
+计划文档 `docs/superpowers/plans/2026-10-05-p0-vintage-parity.md` 的 Task 1
+是照着「backend 尚未接线」的假设写的，实读现有代码后发现 5 处对不上。
+**没有照抄计划**，逐条修正如下：
+
+| # | 计划说的 | 现有代码实际 | 处理 |
+| --- | --- | --- | --- |
+| 1 | `backend/tests/test_filters_era.py` + `pytest` | venv 里**没有 pytest**（`find_spec('pytest') is None`） | 按约定改用 `backend/scripts/verify_era.py`（裸 assert + 退出码） |
+| 2 | `capture_save` 是同步 `def`，「不要改为 async」 | [capture.py](file:///f:/Trae-work/bighead/backend/routes/capture.py#L41) 已经是 `async def`，因为它 `await up.read()` 分块读 | **保持 `async def` 不动**。把 era 烧录放进已有的 `async` 循环里，`await` 不能丢 |
+| 3 | `apply_filter` 签名改 `era: str = "modern"` | [filters.py](file:///f:/Trae-work/bighead/backend/filters.py#L117) `preset="none"` 时**直接 return 原图**，不做任何像素处理 | era 必须能在 `preset="none"` 下单独生效，故 `none` 分支也要走像素链路；同时给 `modern` 加恒等短路，避免白跑一次 RGB↔BGR 转换 |
+| 4 | `preview.py` 里 `from ..config import ERA_KEYS` 局部 import「避免循环依赖」 | `preview.py` 顶部**已经** `from ..config import FILTERS`，config 不 import 任何 route，本来就没环 | 直接提到模块顶部，与既有 `FILTERS` 导入并列，不引入特殊写法 |
+| 5 | `FILTERS` 每项加 `era: "modern"`、`FilterInfo` 加 `era: EraKey` | `era` 是**顶层独立维度**，不属于任何滤镜；计划自己的 Step 1.7 也写了「FilterInfo 不动」 | **后端不加** per-filter `era` 字段（否则是永远为 `modern` 的死字段）；改为 `Meta` 新增顶层 `era_presets` |
+
+> 第 5 条是计划内部自相矛盾（文件总览表说要加 `FilterInfo.era`，
+> Step 1.7 又说不动）。取后者 —— 与「era 叠加在滤镜之上」的架构描述一致。
+
+## 2. `era` 的实现要点
+
+- **恒等函数不是废话**：`modern` 保留成一个显式函数（而不是 `if era == ...` 分支），
+  这样 `apply_filter` 的调用路径恒定，调用方无需知道有哪些 era 存在。
+- **必须能叠加**：`era` 串在**所有**滤镜算子之后，语义是「成片再过一层年代处理」，
+  这样 `preset` 与 `era` 互不干扰（`faded_90s + vintage_2000` ≠ 只跑其中一个）。
+- **`preset="none"` 也要走 era**：用户在取景页关掉滤镜、只想要古早画质是合法组合。
+
+## 3. 验证策略
+
+venv 无 pytest，故 `backend/scripts/verify_era.py` 用裸 `assert` + `TestClient`，
+覆盖三层：
+
+1. **纯函数层**：`_era_modern_pixels` 严格恒等、`_era_vintage_2000_pixels` 通道可度量退化
+2. **路由层**：`era` 非法值 400、`era` 生效、`preset` + `era` 叠加三者都不同
+3. **契约层**：`/api/meta` 的 `era_presets` 与 `config.ERA_PRESETS` 一致（前后端不会各说一套）
+
+**结果：46 项断言全通过，退出码 0。**
+
+## 4. 写验证脚本时抓到的 3 个坑（都是脚本自己的错，不是实现的错）
+
+值得记下来，因为它们都是「断言看起来对、实际是错的」这类隐性错误：
+
+| 坑 | 现象 | 真因 | 修法 |
+| --- | --- | --- | --- |
+| 确定性断言 | 同参数跑两次像素不一致 | `faded_90s` 带 `grain: 8`，`_grain` 用 `cv2.randn` 填噪声，**本来就该每次不同** | 改用 `preset="none"` 隔离 era 再测确定性；随机性是滤镜的既定行为，不该拿来判 era |
+| httpx 的 `files=` | 不传 era 时返回 422 而非 200 | 把 `preset` 放进了 `files=`，httpx 会当作「文件部分」发送，FastAPI 收不到同名 Form 字段 | `files` / `data` 分开传，与前端 `api.ts` 的 FormData 行为对齐 |
+| 通道序 BGR vs RGB | 落盘图「顶部漏光没生效」 | 纯函数层直接用 numpy 判的是 **BGR**（R 在 index 2），而 PIL `convert("RGB")` 出来的是 **RGB**（R 在 index 0），两处混用 | 落盘断言改用 index 0，并在注释里写明两层次序不同 |
+
+> 第 3 条尤其值得警惕：它给出的失败信息是「功能没生效」，
+> 而真因是「断言读错了通道」。若当时直接去改实现，就会把对的代码改错。
+
+## 5. 门禁结果
+
+```
+依赖预检  PY= E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe + OK
+ruff check backend scripts                → All checks passed!
+compileall -q backend scripts              → exit 0
+verify_era.py                              → 46 passed, 0 failed (exit 0)
+tsc -b --force                             → exit 0
+eslint src                                 → 0 error, 1 warning（既有, CountdownOverlay）
+```
+
+> eslint 那条 warning 在 [CountdownOverlay.tsx](file:///f:/Trae-work/bighead/frontend/src/components/CountdownOverlay.tsx#L39)，
+> 是本次改动之前就存在的，与 era 无关。
+
+## 6. 未做 / 已知遗留
+
+- **未跑 8 个 Playwright 端到端回归**。本次只改了 era 这条新链路，
+  `renderMask.ts` 与连拍/蒙版链路零改动，故未启动前后端跑全量脚本。
+  风险面：DecoratePage 的 `doLayout` 条件由 `needFilter` 扩成
+  `needFilter || needEra` —— 当 `era=modern`（默认）时该条件退化为原表达式，
+  行为与改动前逐字节一致，**不影响既有用例**。
+- **`era` 不参与「取景框实时预览」**。取景页的 CSS `ctx.filter` 表达不了
+  低分辨率/漏光/色阶断层，所以实时预览看不到 era 效果，只在成片里体现。
+  这是刻意的：要在浏览器里复刻需引入 canvas 像素级后处理，与
+  「预览=出片」契约的成本收益不划算。
+- **`era` 不进 AI 提示词**。AI 写真走的是模型重绘，era 只作用于
+  `/api/preview/filter` 与落盘，不影响 prompt 构造。

@@ -9,7 +9,8 @@ import {
   startGeneration,
   openJobSocket,
 } from "../api";
-import type { FilterInfo, FrameInfo, LayoutInfo, StyleInfo } from "../types";
+import type { EraInfo, EraKey, FilterInfo, FrameInfo, LayoutInfo, StyleInfo } from "../types";
+import { ERA_DEFAULT, ERA_DEFS, type EraDef } from "../components/eras/eraDefs";
 
 /** 拼图最多用几张(与 HomePage 的连拍张数一致)。 */
 const PHOTO_COUNT_FOR_LAYOUT = 4;
@@ -63,7 +64,25 @@ export function DecoratePage() {
 
   const [meta, setMeta] = useState<{
     styles: StyleInfo[]; filters: FilterInfo[]; frames: FrameInfo[]; layouts: LayoutInfo[];
-  }>({ styles: [], filters: [], frames: [], layouts: [] });
+    era_presets: EraInfo[];
+  }>({ styles: [], filters: [], frames: [], layouts: [], era_presets: [] });
+
+  // 年代是叠加在滤镜之上的独立维度, 与 filter 正交(不存 store: 它只在
+  // 本页参与"生成拼图"这一次性动作, 跨页无意义)。
+  const [era, setEra] = useState<EraKey>(ERA_DEFAULT);
+  // 后端 /api/meta 是 era key 的唯一权威; 拿不到时回落到本地 ERA_DEFS,
+  // 让开关在首屏就能点(否则 meta 慢一点整块面板就是空的)。
+  const eraOptions: EraDef[] = useMemo(
+    () =>
+      meta.era_presets.length > 0
+        ? meta.era_presets.map((e) => ({
+            key: e.key,
+            name: e.name,
+            desc: ERA_DEFS.find((d) => d.key === e.key)?.desc ?? "",
+          }))
+        : ERA_DEFS,
+    [meta.era_presets],
+  );
 
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, msg: "" });
@@ -93,6 +112,7 @@ export function DecoratePage() {
           filters: hasFilter ? cachedFilters : m.filters,
           frames: hasFrame ? cachedFrames : m.frames,
           layouts: m.layouts,
+          era_presets: m.era_presets ?? [],
         });
       })
       .catch(() => {});
@@ -238,12 +258,23 @@ export function DecoratePage() {
         frames.map((f) => dataUrlToBlob(f.url))
       );
       const needFilter = frames.some((f) => !f.burnedIn);
-      const finalBlobs = needFilter
-        ? await Promise.all(blobs.map((b) => applyFilter(b, filter)))
-        : blobs;
+      // era 必须与 preset 走同一趟后端: burnedIn 只保证「滤镜」已烧, 不含年代。
+      // 所以 needFilter 为假但选了古早画质时, 仍要发一次请求(preset 传 none,
+      // 避免把已烧的滤镜再叠一遍)。反之 era=modern 且无需补滤镜时, 一次请求
+      // 都不发 —— 这是连拍 4 张的快路径, 别为 modern 白跑 4 轮 OpenCV。
+      const needEra = era !== ERA_DEFAULT;
+      const finalBlobs =
+        needFilter || needEra
+          ? await Promise.all(
+              blobs.map((b) => applyFilter(b, needFilter ? filter : "none", era)),
+            )
+          : blobs;
 
       // AI 写真
       if (useAi) {
+        // era 传 "modern": 上面 applyFilter 已经把它烧进 finalBlobs 了。
+        // 再传一次会在 /api/capture/save 里叠第二遍(低分辨率+漏光会翻倍),
+        // 而 AI 生成是异步长任务, 这种错误要等 30s 后才看得出来。
         const cap = await saveCaptures(finalBlobs);
         // 先发起生成再订阅: 反过来(先 setCurrentJobId 再 await start)的话,
         // 后端可能在 WS 建连前就 broadcast 了 done, 那条消息永久丢失,
@@ -322,6 +353,32 @@ export function DecoratePage() {
                   }`}
                 >
                   {f.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* 年代处理 */}
+          <div className="bg-white rounded-2xl border-2 border-pink p-4">
+            <div className="font-pixel text-sm text-brick mb-2">年代画质</div>
+            <div className="text-[10px] text-brown/60 mb-2">
+              叠加在滤镜之上, 生成拼图时烧进成片
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {eraOptions.map((e) => (
+                <button
+                  key={e.key}
+                  type="button"
+                  onClick={() => setEra(e.key)}
+                  title={e.desc}
+                  aria-pressed={era === e.key}
+                  className={`px-3 py-1.5 rounded-full text-xs border ${
+                    era === e.key
+                      ? "bg-brick text-white border-brick"
+                      : "bg-cream text-brown border-pink"
+                  }`}
+                >
+                  {e.name}
                 </button>
               ))}
             </div>

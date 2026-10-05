@@ -1,4 +1,4 @@
-import type { Meta, JobStatus } from "./types";
+import type { EraKey, Meta, JobStatus } from "./types";
 
 const API = "/api";
 
@@ -14,18 +14,27 @@ export async function fetchHealth(): Promise<{ ok: boolean; gpu: string; vram_fr
   return r.json();
 }
 
-export async function applyFilter(imageBlob: Blob, preset: string): Promise<Blob> {
+export async function applyFilter(
+  imageBlob: Blob,
+  preset: string,
+  era: EraKey = "modern",
+): Promise<Blob> {
   const fd = new FormData();
   fd.append("image", imageBlob, "cap.jpg");
   fd.append("preset", preset);
+  fd.append("era", era);
   const r = await fetch(`${API}/preview/filter`, { method: "POST", body: fd });
   if (!r.ok) throw new Error("filter failed");
   return r.blob();
 }
 
-export async function saveCaptures(blobs: Blob[]): Promise<{ job_id: string; count: number }> {
+export async function saveCaptures(
+  blobs: Blob[],
+  era: EraKey = "modern",
+): Promise<{ job_id: string; count: number }> {
   const fd = new FormData();
   blobs.forEach((b, i) => fd.append("images", b, `photo_${i + 1}.jpg`));
+  fd.append("era", era);
   const r = await fetch(`${API}/capture/save`, { method: "POST", body: fd });
   if (!r.ok) throw new Error("save failed");
   return r.json();

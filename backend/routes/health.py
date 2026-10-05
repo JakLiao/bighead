@@ -4,8 +4,16 @@ from __future__ import annotations
 from fastapi import APIRouter
 import torch
 
-from ..config import FILTERS, FRAMES, LAYOUTS, STYLES
-from ..schemas import FilterInfo, FrameInfo, HealthResponse, LayoutInfo, MetaResponse, StyleInfo
+from ..config import ERA_PRESETS, FILTERS, FRAMES, LAYOUTS, STYLES
+from ..schemas import (
+    EraInfo,
+    FilterInfo,
+    FrameInfo,
+    HealthResponse,
+    LayoutInfo,
+    MetaResponse,
+    StyleInfo,
+)
 
 router = APIRouter()
 
@@ -47,4 +55,5 @@ async def meta():
             for k, v in FRAMES.items()
         ],
         layouts=[LayoutInfo(key=k, name=v["name"], cols=v["cols"], rows=v["rows"]) for k, v in LAYOUTS.items()],
+        era_presets=[EraInfo(key=k, name=v) for k, v in ERA_PRESETS.items()],
     )

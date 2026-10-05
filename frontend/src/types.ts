@@ -9,6 +9,11 @@ export type FilterKey =
   | "vintage_korean";
 export type FrameKey = "none" | "plain_white" | "korean_pink" | "polaroid" | "checker";
 export type LayoutKey = "2x2" | "2x3" | "3x3" | "strip" | "6inch_4p";
+/**
+ * 年代处理。与 FilterKey 正交 —— 同一个滤镜可配任一年代, 反之亦然,
+ * 所以它是顶层独立维度, 不挂在 FilterInfo 下。
+ */
+export type EraKey = "modern" | "vintage_2000";
 
 export interface StyleInfo {
   key: StyleKey;
@@ -39,12 +44,14 @@ export interface FrameInfo {
   title: string;
 }
 export interface LayoutInfo { key: LayoutKey; name: string; cols: number; rows: number }
+export interface EraInfo { key: EraKey; name: string }
 
 export interface Meta {
   styles: StyleInfo[];
   filters: FilterInfo[];
   frames: FrameInfo[];
   layouts: LayoutInfo[];
+  era_presets: EraInfo[];
 }
 
 export interface JobStatus {

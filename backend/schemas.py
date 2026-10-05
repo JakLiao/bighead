@@ -49,11 +49,18 @@ class LayoutInfo(BaseModel):
     rows: int
 
 
+class EraInfo(BaseModel):
+    key: str
+    name: str
+
+
 class MetaResponse(BaseModel):
     styles: list[StyleInfo]
     filters: list[FilterInfo]
     frames: list[FrameInfo]
     layouts: list[LayoutInfo]
+    # 年代预设在顶层, 不挂在 filters 下 —— era 与 preset 正交可组合。
+    era_presets: list[EraInfo] = Field(default_factory=list)
 
 
 class JobInfo(BaseModel):
