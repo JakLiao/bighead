@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import type { AlbumEntry } from "../../types";
 
+// 与 backend/config.py 的 ALBUM_MAX_* 数值同步, 改一边要同步改另一边。
+const MAX_TITLE = 64;
+const MAX_NOTE = 280;
+const MAX_TAG_LEN = 16;
+const MAX_TAGS = 8;
+
 interface Props {
   jobId: string;
   initial: AlbumEntry;
@@ -38,7 +44,7 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
     const t = raw.trim();
     if (!t) return;
     if (tags.includes(t)) return;
-    if (tags.length >= 8) return;
+    if (tags.length >= MAX_TAGS) return;
     setTags([...tags, t]);
     setTagInput("");
   }
@@ -73,7 +79,9 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex justify-between items-center mb-3">
-          <div className="font-pixel text-brick">编辑 · {jobId.slice(0, 8)}</div>
+          <div className="font-pixel text-brick" data-testid="album-edit-title" data-job-id={jobId}>
+            编辑 · {jobId.slice(0, 8)}
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -84,29 +92,29 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
           </button>
         </div>
 
-        <label className="block text-xs text-brown/70 mb-1">标题 (≤64)</label>
+        <label className="block text-xs text-brown/70 mb-1">标题 (≤{MAX_TITLE})</label>
         <input
           value={title}
-          onChange={(e) => setTitle(e.target.value.slice(0, 64))}
-          maxLength={64}
+          onChange={(e) => setTitle(e.target.value.slice(0, MAX_TITLE))}
+          maxLength={MAX_TITLE}
           className="w-full px-3 py-2 rounded border border-pink bg-white text-sm mb-3"
         />
 
-        <label className="block text-xs text-brown/70 mb-1">备注 (≤280)</label>
+        <label className="block text-xs text-brown/70 mb-1">备注 (≤{MAX_NOTE})</label>
         <textarea
           value={note}
-          onChange={(e) => setNote(e.target.value.slice(0, 280))}
-          maxLength={280}
+          onChange={(e) => setNote(e.target.value.slice(0, MAX_NOTE))}
+          maxLength={MAX_NOTE}
           rows={3}
           className="w-full px-3 py-2 rounded border border-pink bg-white text-sm mb-3 resize-none"
         />
 
         <label className="block text-xs text-brown/70 mb-1">
-          标签 ({tags.length}/8, 回车添加)
+          标签 ({tags.length}/{MAX_TAGS}, 回车添加)
         </label>
         <input
           value={tagInput}
-          onChange={(e) => setTagInput(e.target.value.slice(0, 16))}
+          onChange={(e) => setTagInput(e.target.value.slice(0, MAX_TAG_LEN))}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === ",") {
               e.preventDefault();
