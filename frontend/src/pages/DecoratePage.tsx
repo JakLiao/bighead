@@ -11,9 +11,29 @@ import {
 } from "../api";
 import type { EraInfo, EraKey, FilterInfo, FrameInfo, LayoutInfo, StyleInfo } from "../types";
 import { ERA_DEFAULT, ERA_DEFS, type EraDef } from "../components/eras/eraDefs";
+import { DoodleCanvas, paintDoodleStrokes } from "../components/doodles/DoodleCanvas";
+import {
+  CAPTURE_ASPECT,
+  DOODLE_COLORS,
+  DOODLE_DEFAULT_COLOR,
+  DOODLE_DEFAULT_TOOL,
+  DOODLE_DEFAULT_WIDTH,
+  DOODLE_TOOLS,
+  DOODLE_WIDTHS,
+  type DoodleStroke,
+  type DoodleTool,
+} from "../components/doodles/doodleTypes";
 
 /** 拼图最多用几张(与 HomePage 的连拍张数一致)。 */
 const PHOTO_COUNT_FOR_LAYOUT = 4;
+
+/**
+ * 编辑模态里涂鸦画布的显示尺寸(后端 backing store 是它的 2×)。
+ * 取 4:3 与出片一致 —— 比例不一致会让 img 被 object-cover 裁掉一圈,
+ * 而 canvas 仍按整块容器铺, 存下的 0..1 坐标就相对"被裁后的画面"了。
+ */
+const DOODLE_EDIT_W = 640;
+const DOODLE_EDIT_H = Math.round((DOODLE_EDIT_W * CAPTURE_ASPECT.h) / CAPTURE_ASPECT.w);
 
 /**
  * dataURL -> Blob。
@@ -32,6 +52,127 @@ function dataUrlToBlob(url: string): Promise<Blob> {
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   const mime = /data:([^;,]+)/.exec(head)?.[1] ?? "image/jpeg";
   return Promise.resolve(new Blob([bytes], { type: mime }));
+}
+
+/**
+ * 把一笔笔涂鸦烧进照片, 返回新 Blob。
+ *
+ * **为什么先画在独立透明层上, 再整体贴到照片**: 橡皮用的是
+ * destination-out, 而 destination-out 擦的是"目标画布上已有的一切"。
+ * 直接画在照片上就会把照片本身擦成透明, 导出 JPEG 时那块变成白/黑 ——
+ * 用户想擦掉一笔笔迹, 结果在照片上开了个洞。隔一层之后, 橡皮只能擦到
+ * 同一层里的笔迹, 擦完露出来的是照片, 正是所见即所得。
+ *
+ * 复用 paintDoodleStrokes(与编辑模态同一个渲染器), 保证"画时看到的那笔"
+ * 与"这里烧进去的那笔"逐像素一致。
+ */
+async function burnDoodles(photoBlob: Blob, strokes: DoodleStroke[]): Promise<Blob> {
+  if (strokes.length === 0) return photoBlob;
+  const bitmap = await createImageBitmap(photoBlob);
+  const w = bitmap.width;
+  const h = bitmap.height;
+
+  const layer = document.createElement("canvas");
+  layer.width = w;
+  layer.height = h;
+  paintDoodleStrokes(layer.getContext("2d"), strokes);
+
+  const out = document.createElement("canvas");
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext("2d");
+  if (!ctx) {
+    bitmap.close();
+    return photoBlob;
+  }
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  ctx.drawImage(layer, 0, 0);
+  bitmap.close();
+
+  // toBlob 在 canvas  tainted 或尺寸超限时给 null, 回落原图而不是抛错 ——
+  // 烧录失败不该让用户丢掉整轮照片。
+  const burned = await new Promise<Blob | null>((resolve) =>
+    out.toBlob(resolve, "image/jpeg", 0.92),
+  );
+  return burned ?? photoBlob;
+}
+
+interface ToolbarProps {
+  color: string;
+  tool: DoodleTool;
+  width: number;
+  onColor: (c: string) => void;
+  onTool: (t: DoodleTool) => void;
+  onWidth: (w: number) => void;
+}
+
+/**
+ * 色板 + 工具 + 粗细。
+ *
+ * 侧栏与编辑模态各渲染一份, 状态是同一份(都提到 DecoratePage)。
+ * 模态里必须再放一份: 它是 fixed inset-0 的全屏遮罩, 会把侧栏整个盖住 ——
+ * 只在侧栏放控件的话, 用户一旦进编辑就换不了颜色, 只能"退出 → 换色 → 重进",
+ * 而笔迹是画在遮罩之上的, 这个动线会直接劝退。
+ */
+function DoodleToolbar({ color, tool, width, onColor, onTool, onWidth }: ToolbarProps) {
+  return (
+    <>
+      <div className="grid grid-cols-4 gap-1.5 mb-2">
+        {DOODLE_COLORS.map((c) => (
+          <button
+            type="button"
+            key={c.color}
+            onClick={() => onColor(c.color)}
+            data-doodle-color={c.color}
+            aria-pressed={color === c.color}
+            aria-label={`涂鸦颜色 ${c.name}`}
+            title={c.name}
+            style={{ background: c.color }}
+            className={`h-7 w-full rounded-full border-2 transition ${
+              color === c.color ? "border-brick scale-110" : "border-white"
+            }`}
+          />
+        ))}
+      </div>
+      <div className="flex gap-1.5 mb-2">
+        {DOODLE_TOOLS.map((t) => (
+          <button
+            type="button"
+            key={t.key}
+            onClick={() => onTool(t.key)}
+            data-doodle-tool={t.key}
+            aria-pressed={tool === t.key}
+            title={t.hint}
+            className={`flex-1 rounded px-2 py-1 text-xs transition ${
+              tool === t.key
+                ? "bg-brick text-white"
+                : "border border-pink bg-cream text-brown hover:bg-pink/30"
+            }`}
+          >
+            {t.name}
+          </button>
+        ))}
+      </div>
+      <div className="flex gap-1.5">
+        {DOODLE_WIDTHS.map((w) => (
+          <button
+            type="button"
+            key={w.width}
+            onClick={() => onWidth(w.width)}
+            data-doodle-width={w.width}
+            aria-pressed={width === w.width}
+            className={`flex-1 rounded py-1 text-xs transition ${
+              width === w.width
+                ? "bg-brick text-white"
+                : "border border-pink bg-cream text-brown hover:bg-pink/30"
+            }`}
+          >
+            {w.name}
+          </button>
+        ))}
+      </div>
+    </>
+  );
 }
 
 export function DecoratePage() {
@@ -87,6 +228,21 @@ export function DecoratePage() {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState({ current: 0, total: 0, msg: "" });
   const [error, setError] = useState<string | null>(null);
+  // 涂鸦: 笔画进 store(要活到 doLayout), 笔具/颜色/粗细只是当前选中的
+  // 编辑态参数, 不进 store —— 它们不参与出片, 换一轮连拍后保留也无害,
+  // 但放 store 会让"哪些字段影响成片"这件事变得难以一眼看清。
+  const doodles = useStore((s) => s.doodles);
+  const setDoodles = useStore((s) => s.setDoodles);
+  const clearDoodle = useStore((s) => s.clearDoodle);
+  const [doodleColor, setDoodleColor] = useState(DOODLE_DEFAULT_COLOR);
+  const [doodleTool, setDoodleTool] = useState<DoodleTool>(DOODLE_DEFAULT_TOOL);
+  const [doodleWidth, setDoodleWidth] = useState(DOODLE_DEFAULT_WIDTH);
+  // 正在编辑第几张。null = 没进编辑。
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const doodleTotal = useMemo(
+    () => Object.values(doodles).reduce((n, list) => n + list.length, 0),
+    [doodles],
+  );
   // 相框已在取景阶段烧进照片。本页的"相框"选择改为「额外再套一层」,
   // 默认 none,即保持所见即所得的结果不变。想换框请回取景页重拍。
   const [frameOverride, setFrameOverride] = useState<string | null>(null);
@@ -257,6 +413,13 @@ export function DecoratePage() {
       const blobs = await Promise.all(
         frames.map((f) => dataUrlToBlob(f.url))
       );
+      // 涂鸦烧录。位置很关键: 必须在滤镜/年代**之前**。
+      // 这样笔迹会跟着整张图一起被处理(颗粒、漏光、暗角一视同仁), 也就是
+      // 用户"在成片上手写"的真实预期; 反过来先烧滤镜再叠笔迹, 笔迹会
+      // 浮在一层被处理过的画面上, 与编辑模态里看到的(原图上的笔迹)对不上。
+      const stamped = await Promise.all(
+        blobs.map((b, i) => (doodles[i]?.length ? burnDoodles(b, doodles[i]) : b)),
+      );
       const needFilter = frames.some((f) => !f.burnedIn);
       // era 必须与 preset 走同一趟后端: burnedIn 只保证「滤镜」已烧, 不含年代。
       // 所以 needFilter 为假但选了古早画质时, 仍要发一次请求(preset 传 none,
@@ -266,9 +429,9 @@ export function DecoratePage() {
       const finalBlobs =
         needFilter || needEra
           ? await Promise.all(
-              blobs.map((b) => applyFilter(b, needFilter ? filter : "none", era)),
+              stamped.map((b) => applyFilter(b, needFilter ? filter : "none", era)),
             )
-          : blobs;
+          : stamped;
 
       // AI 写真
       if (useAi) {
@@ -425,6 +588,46 @@ export function DecoratePage() {
             )}
           </div>
 
+          {/* 涂鸦 */}
+          <div className="bg-white rounded-2xl border-2 border-pink p-4" data-doodle-scope="sidebar">
+            <div className="font-pixel text-sm text-brick mb-2">手写涂鸦</div>
+            <div className="text-[10px] text-brown/60 mb-2" data-doodle-count={doodleTotal}>
+              点上方照片进入编辑 · 共 {doodleTotal} 笔
+            </div>
+            <DoodleToolbar
+              color={doodleColor}
+              tool={doodleTool}
+              width={doodleWidth}
+              onColor={setDoodleColor}
+              onTool={setDoodleTool}
+              onWidth={setDoodleWidth}
+            />
+            {editingIdx !== null && (
+              <div className="mt-2 flex gap-1.5">
+                <button
+                  type="button"
+                  data-doodle-undo=""
+                  disabled={!doodles[editingIdx]?.length}
+                  onClick={() =>
+                    setDoodles(editingIdx, doodles[editingIdx].slice(0, -1))
+                  }
+                  className="flex-1 rounded border border-pink px-2 py-1 text-xs text-brown hover:bg-pink/20 disabled:opacity-40"
+                >
+                  撤销一笔
+                </button>
+                <button
+                  type="button"
+                  data-doodle-clear=""
+                  disabled={!doodles[editingIdx]?.length}
+                  onClick={() => clearDoodle(editingIdx)}
+                  className="flex-1 rounded border border-pink px-2 py-1 text-xs text-brown hover:bg-pink/20 disabled:opacity-40"
+                >
+                  清空这张
+                </button>
+              </div>
+            )}
+          </div>
+
           {/* 生成按钮 */}
           <button
             onClick={() => doLayout(aiEnabled)}
@@ -460,17 +663,89 @@ export function DecoratePage() {
         </aside>
 
         <section>
+          {editingIdx !== null && displayImages[editingIdx] && (
+            <div
+              data-doodle-modal=""
+              className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+              onClick={() => setEditingIdx(null)}
+            >
+              <div
+                className="max-h-[92vh] w-[92vw] max-w-3xl overflow-auto rounded-2xl bg-cream p-4"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="mb-3 flex items-center justify-between">
+                  <div className="font-pixel text-sm text-brick">
+                    编辑涂鸦 #{editingIdx + 1}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingIdx(null)}
+                    className="rounded-full bg-brick px-4 py-1.5 text-xs text-white"
+                  >
+                    完成
+                  </button>
+                </div>
+
+                <div data-doodle-scope="modal">
+                  <DoodleToolbar
+                    color={doodleColor}
+                    tool={doodleTool}
+                    width={doodleWidth}
+                    onColor={setDoodleColor}
+                    onTool={setDoodleTool}
+                    onWidth={setDoodleWidth}
+                  />
+                </div>
+
+                <div className="mt-3 flex justify-center">
+                  <DoodleCanvas
+                    src={displayImages[editingIdx]}
+                    strokes={doodles[editingIdx] ?? []}
+                    color={doodleColor}
+                    tool={doodleTool}
+                    brush={doodleWidth}
+                    onChange={(next) => setDoodles(editingIdx, next)}
+                    width={DOODLE_EDIT_W}
+                    height={DOODLE_EDIT_H}
+                  />
+                </div>
+
+                <div className="mt-3 text-[10px] text-brown/60">
+                  在照片上按住拖动即可落笔 · 橡皮可擦掉已画的笔迹 ·
+                  所有笔迹在点「生成拼图」时烧进最终图
+                  {doodles[editingIdx]?.length
+                    ? ` · 当前这张 ${doodles[editingIdx].length} 笔`
+                    : ""}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
             {displayImages.slice(0, 8).map((src, i) => (
-              <div key={i} className="aspect-[3/4] bg-white rounded-lg border-2 border-pink overflow-hidden">
+              <button
+                type="button"
+                key={i}
+                data-doodle-thumb={i}
+                onClick={() => setEditingIdx(i)}
+                title="点击编辑这张的涂鸦"
+                className="relative aspect-[3/4] w-full overflow-hidden rounded-lg border-2 border-pink bg-white text-left transition hover:border-brick"
+              >
                 <img
                   src={src}
                   alt=""
                   loading="lazy"
                   decoding="async"
-                  className="w-full h-full object-cover"
+                  className="h-full w-full object-cover"
                 />
-              </div>
+                {doodles[i]?.length ? (
+                  <span
+                    data-doodle-badge={i}
+                    className="absolute right-1 top-1 rounded-full bg-brick px-1.5 py-0.5 text-[10px] text-white"
+                  >
+                    {doodles[i].length} 笔
+                  </span>
+                ) : null}
+              </button>
             ))}
           </div>
 

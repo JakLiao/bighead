@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { FilterInfo, FilterKey, FrameInfo, FrameKey, LayoutKey, StyleKey } from "./types";
+import type { DoodleStroke, DoodlesByIndex } from "./components/doodles/doodleTypes";
 
 /**
  * 一张连拍照。
@@ -38,6 +39,16 @@ export interface CaptureState {
   maskKey: string;
   /** 蒙版图库抽屉是否展开 */
   maskGalleryOpen: boolean;
+  /**
+   * 每张照片的手写涂鸦, key 是 frames 数组下标(与 displayImages 同源)。
+   *
+   * 为什么进 store 而不是 DecoratePage 的局部 state: 涂鸦要活到「点生成拼图」
+   * 那一刻, 而编辑入口(缩略图)与烧录出口(doLayout)都在 DecoratePage 内,
+   * 局部 state 其实也够。真正的原因是**跨页与重渲染的确定性** —— store 有
+   * reset 这个明确的生命周期钩子, 新一轮连拍时能一并清掉; 局部 state 只能
+   * 靠 useEffect 手动清理, 漏一次就会出现"上一轮的笔迹烧进这一轮的照片"。
+   */
+  doodles: DoodlesByIndex;
   setFrames: (f: Frame[]) => void;
   setCurrentJobId: (id: string | null) => void;
   setFilter: (f: FilterKey) => void;
@@ -53,6 +64,10 @@ export interface CaptureState {
   setShowGuides: (v: boolean) => void;
   setMaskKey: (v: string) => void;
   setMaskGalleryOpen: (v: boolean) => void;
+  /** 覆盖第 idx 张照片的涂鸦(整体替换, 编辑器每落一笔调用一次) */
+  setDoodles: (idx: number, strokes: DoodleStroke[]) => void;
+  /** 丢掉第 idx 张照片的涂鸦, 回到"没画过" */
+  clearDoodle: (idx: number) => void;
   reset: () => void;
 }
 
@@ -76,6 +91,7 @@ export const useStore = create<CaptureState>((set) => ({
   showGuides: true,
   maskKey: "heart",
   maskGalleryOpen: false,
+  doodles: {},
   setFrames: (f) => set({ frames: f }),
   setCurrentJobId: (id) => set({ currentJobId: id }),
   setFilter: (f) => set({ filter: f }),
@@ -91,15 +107,29 @@ export const useStore = create<CaptureState>((set) => ({
   setShowGuides: (v) => set({ showGuides: v }),
   setMaskKey: (v) => set({ maskKey: v }),
   setMaskGalleryOpen: (v) => set({ maskGalleryOpen: v }),
+  setDoodles: (idx, strokes) => set((s) => ({ doodles: { ...s.doodles, [idx]: strokes } })),
+  // 删 key 而不是置空数组: "没画过"与"画了又清空"在成片上等价, 但用
+  // 缺 key 表示前者, doLayout 的 `doodles[i]?.length` 一处判断就够。
+  clearDoodle: (idx) =>
+    set((s) => {
+      if (!(idx in s.doodles)) return s;
+      const next = { ...s.doodles };
+      delete next[idx];
+      return { doodles: next };
+    }),
   // 开始新一轮连拍时清掉上一轮的成片。DecoratePage 的 layoutUrl 可能是
   // blob: URL, 这里只置空 —— 真正的 revoke 在 DecoratePage 的卸载 effect 里做,
   // 因为那里才知道当前值是不是自己创建的 blob。
+  // doodles 必须一起清: 涂鸦按 frames 下标索引, 而 frames 会被整体换掉,
+  // 残留的旧下标会被新照片"继承"—— 上一轮写在第 2 张的笔迹会烧到这一轮
+  // 的第 2 张上, 用户完全无法解释这个现象。
   reset: () =>
     set({
       frames: [],
       currentJobId: null,
       aiImages: [],
       layoutUrl: null,
+      doodles: {},
     }),
 }));
 
