@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .routes import capture, gallery, generate, health, layout, preview, ws_jobs
+from .routes import capture, gallery, generate, health, layout, preview, share, ws_jobs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
@@ -44,6 +44,7 @@ app.include_router(capture.router)
 app.include_router(layout.router)
 app.include_router(generate.router)
 app.include_router(gallery.router)
+app.include_router(share.router)
 app.include_router(ws_jobs.router)
 
 # 静态目录(生成的图)
