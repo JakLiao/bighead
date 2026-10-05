@@ -23,9 +23,11 @@ from ..config import (
 router = APIRouter()
 
 # job_id 必须是文件系统安全且相对短的 token。规则:字母数字下划线, 长度 4~64。
+# 首字符必须是字母数字 —— GET 路由 gallery() 会跳过 _ 与 . 开头的目录,
+# 不限制首字符会让 PATCH/DELETE 改得到但 GET 看不到, 前后端契约不一致。
 # 比对 URL 后再 resolve() 到 OUTPUT_DIR 内, 双层防御, 任意一层失守也不会
 # 越过 OUTPUT_DIR 边界。
-_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{4,64}$")
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,63}$")
 
 # 单进程内对 _album.json 的所有读写都过这个锁。读也加锁, 否则 PATCH 与
 # GET 之间会出现「读到中间态」的可能。单机自用, 不需要跨进程。
@@ -38,7 +40,7 @@ _album_lock = Lock()
 def _validate_job_id(job_id: str) -> str | None:
     """合法返回 None, 不合法返回错误描述。"""
     if not _JOB_ID_RE.match(job_id):
-        return "job_id 必须是 4~64 位的 [A-Za-z0-9_-]"
+        return "job_id 必须是 4~64 位的 [A-Za-z0-9_-], 且首字符为字母数字"
     return None
 
 
@@ -52,9 +54,18 @@ def _load_album(outdir: Path) -> dict:
         return {}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        # 文件坏了不能让整个 /api/gallery 挂掉, 静默退化为空集。
-        # 用户真实元数据已经丢了, 但 photos 还在, 这是权衡之下的最小伤害。
+    except json.JSONDecodeError:
+        # 文件坏了不能让整个 /api/gallery 挂掉, 但直接把坏文件丢在这里
+        # 下次 _save_album 会覆盖它 —— 原始元数据不可逆丢失。
+        # 改: 重命名为 _album.json.broken-<ts> 备份, 让用户能手工恢复。
+        # OSError 一般是 IO 抖动, 文件不一定真坏, 不备份, 直接返回 {}。
+        try:
+            backup = p.with_name(f"{p.name}.broken-{int(time.time())}")
+            os.replace(p, backup)
+        except OSError:
+            pass
+        return {}
+    except OSError:
         return {}
 
 
