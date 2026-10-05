@@ -25,12 +25,25 @@ export function GalleryPage() {
   }
 
   useEffect(() => {
-    let alive = true;
-    reload().then(() => {
-      if (!alive) return;
-    });
+    // cancelled 标志而非 alive: 组件卸载后不再 setState, 避免对已消失的
+    // 列表做无意义的状态更新。React 18 不再为此告警, 但显式守卫更清晰。
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const g = await fetchGallery();
+        if (cancelled) return;
+        setItems(g.items);
+        setError(null);
+      } catch (e) {
+        if (cancelled) return;
+        setError((e as Error).message ?? String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
     return () => {
-      alive = false;
+      cancelled = true;
     };
   }, []);
 
@@ -66,6 +79,7 @@ export function GalleryPage() {
           <button
             key={it.job_id}
             type="button"
+            data-job-id={it.job_id}
             onClick={() => setEditingId(it.job_id)}
             className="relative bg-white rounded-xl border-2 border-pink p-2 text-left
                        hover:border-brick transition-colors group"
