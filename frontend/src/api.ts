@@ -1,4 +1,4 @@
-import type { EraKey, Meta, JobStatus } from "./types";
+import type { EraKey, Meta, JobStatus, GalleryResponse, AlbumEntry } from "./types";
 
 const API = "/api";
 
@@ -115,8 +115,28 @@ export function openJobSocket(
   return ws;
 }
 
-export async function fetchGallery(): Promise<{ items: { job_id: string; mtime: number; thumbs: string[] }[] }> {
+export async function fetchGallery(): Promise<GalleryResponse> {
   const r = await fetch(`${API}/gallery`);
   if (!r.ok) throw new Error(`fetchGallery ${r.status}`);
+  return r.json();
+}
+
+/** PATCH 局部字段; tags 必须传完整数组(后端整体覆盖), 其他字段缺省视为不更新。 */
+export async function patchAlbum(
+  job_id: string,
+  patch: Partial<AlbumEntry>,
+): Promise<AlbumEntry & { job_id: string }> {
+  const r = await fetch(`${API}/gallery/${encodeURIComponent(job_id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!r.ok) throw new Error(`patchAlbum ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+export async function deleteAlbum(job_id: string): Promise<{ job_id: string; deleted: boolean }> {
+  const r = await fetch(`${API}/gallery/${encodeURIComponent(job_id)}`, { method: "DELETE" });
+  if (!r.ok) throw new Error(`deleteAlbum ${r.status}: ${await r.text()}`);
   return r.json();
 }

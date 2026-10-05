@@ -64,3 +64,29 @@ export interface JobStatus {
   layout_url?: string | null;
   vram_peak_gb: number;
 }
+
+/** 单条贴纸册元数据。缺省字段见后端 _normalize_entry。 */
+export interface AlbumEntry {
+  title: string;
+  note: string;
+  /** 标签列表, 后端会裁剪到 16 字节/个、8 个上限 */
+  tags: string[];
+  favorite: boolean;
+  updated_at: number;
+}
+
+/** /api/gallery items 元素的完整形态(磁盘信息 + 元数据)。 */
+export interface GalleryItem {
+  job_id: string;
+  mtime: number;
+  thumbs: string[];
+  title: string;
+  note: string;
+  tags: string[];
+  favorite: boolean;
+  updated_at: number;
+}
+
+export interface GalleryResponse {
+  items: GalleryItem[];
+}
