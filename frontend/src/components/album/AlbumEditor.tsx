@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { AlbumEntry } from "../../types";
+import { useEscape } from "./useEscape";
 
 // 与 backend/config.py 的 ALBUM_MAX_* 数值同步, 改一边要同步改另一边。
 const MAX_TITLE = 64;
@@ -49,6 +50,31 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
     setTagInput("");
   }
 
+  /**
+   * 内容是否真的被改过。
+   *
+   * 拿它给保存按钮置灰。**后端也拦一道**(见 gallery_patch 的 _same_content),
+   * 但两道不是冗余: 后端拦的是数据正确性, 前端拦的是交互反馈 ——
+   * 用户点一下看到按钮变灰、提示「无改动」, 比点了之后拿到一个
+   * 「已保存但什么都没变」的响应要清楚得多。
+   *
+   * tags 必须逐位比而不是直接 `!==`: 数组每次渲染都是新引用, 直接比会
+   * 恒为「有变化」, 按钮就永远可点, 置灰逻辑等于不存在。
+   */
+  const dirty =
+    title !== initial.title ||
+    note !== initial.note ||
+    favorite !== initial.favorite ||
+    tags.length !== initial.tags.length ||
+    tags.some((t, i) => t !== initial.tags[i]);
+
+  // Esc 关闭。pending 期间不关: PATCH/DELETE 正在飞, 关掉抽屉会让用户
+  // 以为操作没生效, 而后台其实已经把数据改了。
+  const requestClose = useCallback(() => {
+    if (!pending) onClose();
+  }, [pending, onClose]);
+  useEscape(requestClose);
+
   async function handleSave() {
     setPending(true);
     try {
@@ -97,6 +123,7 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
           value={title}
           onChange={(e) => setTitle(e.target.value.slice(0, MAX_TITLE))}
           maxLength={MAX_TITLE}
+          data-album-title=""
           className="w-full px-3 py-2 rounded border border-pink bg-white text-sm mb-3"
         />
 
@@ -105,6 +132,7 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
           value={note}
           onChange={(e) => setNote(e.target.value.slice(0, MAX_NOTE))}
           maxLength={MAX_NOTE}
+          data-album-note=""
           rows={3}
           className="w-full px-3 py-2 rounded border border-pink bg-white text-sm mb-3 resize-none"
         />
@@ -180,6 +208,7 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
             type="button"
             onClick={onClose}
             disabled={pending}
+            data-album-cancel=""
             className="px-4 py-2 text-sm border border-pink rounded-full"
           >
             取消
@@ -187,10 +216,12 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
           <button
             type="button"
             onClick={handleSave}
-            disabled={pending}
+            disabled={pending || !dirty}
+            data-album-save=""
             className="px-4 py-2 text-sm bg-brick text-white rounded-full disabled:opacity-50"
+            title={dirty ? "" : "内容没有改动"}
           >
-            {pending ? "保存中..." : "保存"}
+            {pending ? "保存中..." : dirty ? "保存" : "无改动"}
           </button>
         </div>
       </div>

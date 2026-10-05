@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchGallery, patchAlbum, deleteAlbum } from "../api";
-import type { GalleryItem } from "../types";
+import type { GalleryItem, TagCount } from "../types";
 import { AlbumEditor } from "../components/album/AlbumEditor";
 
 export function GalleryPage() {
@@ -8,32 +8,27 @@ export function GalleryPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
+  // 筛选条件。**由后端过滤**(见 backend/routes/gallery.py 的 gallery()),
+  // 前端只负责把输入传下去 —— 这样 ?q=xx 是一个可复现的链接, 而不是
+  // 只在这一次的内存里生效的临时状态。
+  const [q, setQ] = useState("");
+  const [tag, setTag] = useState("");
+  const [tags, setTags] = useState<TagCount[]>([]);
 
   const editing = items.find((it) => it.job_id === editingId) ?? null;
 
-  async function reload() {
-    setLoading(true);
-    try {
-      const g = await fetchGallery();
-      setItems(g.items);
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message ?? String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
+  // q / tag 变了就重新拉。取消守卫防的是「快速连续输入时, 早先发出的请求
+  // 后到达, 把后发的结果覆盖掉」—— 这不是理论问题, 本机几十条数据时
+  // 两个请求的间隔可能只有几毫秒。
   useEffect(() => {
-    // cancelled 标志而非 alive: 组件卸载后不再 setState, 避免对已消失的
-    // 列表做无意义的状态更新。React 18 不再为此告警, 但显式守卫更清晰。
     let cancelled = false;
     (async () => {
       setLoading(true);
       try {
-        const g = await fetchGallery();
+        const g = await fetchGallery(q, tag);
         if (cancelled) return;
         setItems(g.items);
+        setTags(g.tags ?? []);
         setError(null);
       } catch (e) {
         if (cancelled) return;
@@ -45,7 +40,20 @@ export function GalleryPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [q, tag]);
+
+  // 编辑/删除后按**当前筛选条件**重拉, 而不是无条件全量 —— 否则在筛选状态下
+  // 保存一条, 列表会突然变回全量, 用户刚找到的那条记录"消失"了。
+  const reload = useCallback(async () => {
+    try {
+      const g = await fetchGallery(q, tag);
+      setItems(g.items);
+      setTags(g.tags ?? []);
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message ?? String(e));
+    }
+  }, [q, tag]);
 
   async function handleSave(jobId: string, patch: Partial<GalleryItem>) {
     // 把 GalleryItem 上的额外字段(title/note/tags/favorite)提取出来
@@ -68,11 +76,59 @@ export function GalleryPage() {
         </div>
       </div>
 
-      {loading && <div className="text-brown/70">加载中...</div>}
+      {loading && items.length === 0 && <div className="text-brown/70">加载中...</div>}
       {error && <div className="text-red-500 text-sm">加载失败:{error}</div>}
       {!loading && !error && items.length === 0 && (
-        <div className="text-brown/70">还没有拍摄记录。</div>
+        <div className="text-brown/70">
+          {q || tag ? "没有匹配的记录。" : "还没有拍摄记录。"}
+        </div>
       )}
+
+      <div className="mb-4 flex flex-col gap-2">
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索标题 / 备注 / 标签 / 编号"
+          data-gallery-search=""
+          aria-label="搜索贴纸册"
+          className="px-3 py-2 rounded-full border border-pink bg-white text-sm w-full max-w-md"
+        />
+        {/*
+          筛选条只在有标签时出现。空状态给一块空白横条毫无信息量, 且会让
+          "搜索框下面空着一块" 看起来像加载失败。
+        */}
+        {tags.length > 0 && (
+          <div className="flex flex-wrap gap-1.5" data-gallery-tags="">
+            <button
+              type="button"
+              onClick={() => setTag("")}
+              aria-pressed={tag === ""}
+              data-gallery-tag=""
+              className={`px-2.5 py-0.5 rounded-full text-xs border ${
+                tag === "" ? "bg-brick text-white border-brick"
+                           : "bg-cream text-brown border-pink"
+              }`}
+            >
+              全部
+            </button>
+            {tags.map((t) => (
+              <button
+                key={t.tag}
+                type="button"
+                data-gallery-tag={t.tag}
+                onClick={() => setTag(t.tag === tag ? "" : t.tag)}
+                aria-pressed={tag === t.tag}
+                className={`px-2.5 py-0.5 rounded-full text-xs border ${
+                  tag === t.tag ? "bg-brick text-white border-brick"
+                                : "bg-cream text-brown border-pink"
+                }`}
+              >
+                {t.tag} {t.count}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
         {items.map((it) => (

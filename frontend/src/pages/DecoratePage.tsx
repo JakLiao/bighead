@@ -6,9 +6,11 @@ import {
   fetchMeta,
   makeLayout,
   saveCaptures,
+  saveShareCard,
   startGeneration,
   openJobSocket,
 } from "../api";
+import { renderShareCard } from "../shareCard";
 import type { EraInfo, EraKey, FilterInfo, FrameInfo, LayoutInfo, StyleInfo } from "../types";
 import { ERA_DEFAULT, ERA_DEFS, type EraDef } from "../components/eras/eraDefs";
 import { DoodleCanvas, paintDoodleStrokes } from "../components/doodles/DoodleCanvas";
@@ -158,6 +160,33 @@ async function burnStickers(
   }
 }
 
+/**
+ * 拼图并**同时落盘**到 job 目录顶层。
+ *
+ * 与 makeLayout 的区别只有一处: 多传一个 job_id, 让后端把同一份 JPEG 字节
+ * 写进 outputs/{job_id}/layout.jpg。返回值仍是 JPEG Blob —— 分享卡要靠它
+ * 在本地 canvas 上合成, 而贴纸册要靠落盘那份, 两个用途各取所需。
+ *
+ * 不复用 makeLayout 再单独调一次上传: 那样拼图会被编码两次(两次 JPEG
+ * 损失), 且两次编码结果可能不同, 出现「分享卡里的图和贴纸册里的图不是
+ * 同一张」。让后端一次编码两处用, 从根上避免不一致。
+ */
+async function makeLayoutToJob(
+  blobs: Blob[],
+  jobId: string,
+  layout: string,
+  frame: string | null,
+): Promise<Blob> {
+  const fd = new FormData();
+  blobs.forEach((b, i) => fd.append("images", b, `p_${i}.jpg`));
+  fd.append("layout", layout);
+  fd.append("frame", frame ?? "none");
+  fd.append("job_id", jobId);
+  const r = await fetch("/api/layout/make", { method: "POST", body: fd });
+  if (!r.ok) throw new Error(`layout failed ${r.status}: ${await r.text()}`);
+  return r.blob();
+}
+
 interface ToolbarProps {
   color: string;
   tool: DoodleTool;
@@ -274,6 +303,8 @@ export function DecoratePage() {
   const setAiImages = useStore((s) => s.setAiImages);
   const layoutUrl = useStore((s) => s.layoutUrl);
   const setLayoutUrl = useStore((s) => s.setLayoutUrl);
+  const shareUrl = useStore((s) => s.shareUrl);
+  const setShareUrl = useStore((s) => s.setShareUrl);
   // 下载文件名。刻意不自定义: 服务端 layout.jpg 的路径里已含唯一的 job_id
   // (/outputs/<job_id>/ai/<style>/layout.jpg), 浏览器会自动取它做文件名。
   // 之前写的是 `bighead_${Date.now()}.jpg` —— 那是渲染期的 impure 调用,
@@ -401,6 +432,14 @@ export function DecoratePage() {
   useEffect(() => {
     layoutUrlRef.current = layoutUrl;
   }, [layoutUrl]);
+  // currentJobId 同理: layoutFromAiImages 是 useCallback, 若直接把
+  // currentJobId 写进依赖数组, 每次 job 变化都会重建它, 而 WS 订阅 effect
+  // 依赖 layoutFromAiImages —— 结果是 job 一变就重连 WS, 而重连可能正好
+  // 错过 done 广播。用 ref 读最新值, 依赖数组保持稳定。
+  const currentJobIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    currentJobIdRef.current = currentJobId;
+  }, [currentJobId]);
   useEffect(() => {
     return () => {
       if (layoutUrlRef.current) URL.revokeObjectURL(layoutUrlRef.current);
@@ -418,10 +457,26 @@ export function DecoratePage() {
   // 依赖数组能保持稳定 —— 否则每次 render 都是新函数, 会反复重建 WS 连接。
   const layoutFromAiImages = useCallback(async (urls: string[], serverLayout?: string | null) => {
     const prev = layoutUrlRef.current;
+    const jobId = currentJobIdRef.current;
     try {
       if (serverLayout) {
         if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
         setLayoutUrl(serverLayout);
+        // 服务端已经把 AI 拼图镜像到 job 顶层(pipeline._mirror_layout_to_top),
+        // 但**没有**分享卡 —— 卡片需要 job_id 与拍摄日期, 只有前端知道这一轮
+        // 刚拍完。所以这里把顶层 layout.jpg 抓成 blob 本地合成卡片再落盘。
+        if (jobId) {
+          try {
+            const lr = await fetch(`/outputs/${jobId}/layout.jpg`);
+            if (lr.ok) {
+              const card = await renderShareCard(await lr.blob(), jobId);
+              const saved = await saveShareCard(jobId, card);
+              setShareUrl(saved.share_url);
+            }
+          } catch {
+            // 分享卡失败不该影响 AI 成片的展示 —— 拼图已经能看了。
+          }
+        }
         return;
       }
       const picked = urls.slice(0, PHOTO_COUNT_FOR_LAYOUT);
@@ -432,15 +487,31 @@ export function DecoratePage() {
           return r.blob();
         })
       );
-      const result = await makeLayout(blobs, layout, frameOverride ?? "none");
-      if (prev) URL.revokeObjectURL(prev);
-      setLayoutUrl(URL.createObjectURL(result));
+      // 兜底路径(后端 build_ai_layout 失败): 客户端自己拼。这里**同时落盘**,
+      // 否则这个 job 在贴纸册里只有 4 张单图、没有拼图 —— 正是本次要修的
+      // 「AI 拼图在贴纸册不展示」的同一类问题。
+      let result: Blob;
+      if (jobId) {
+        result = await makeLayoutToJob(blobs, jobId, layout, frameOverride);
+        setLayoutUrl(`/outputs/${jobId}/layout.jpg`);
+        try {
+          const card = await renderShareCard(result, jobId);
+          const saved = await saveShareCard(jobId, card);
+          setShareUrl(saved.share_url);
+        } catch {
+          // 同上: 分享卡失败不阻断出片
+        }
+      } else {
+        result = await makeLayout(blobs, layout, frameOverride ?? "none");
+        if (prev) URL.revokeObjectURL(prev);
+        setLayoutUrl(URL.createObjectURL(result));
+      }
     } catch (e: any) {
       setError(e.message ?? String(e));
     } finally {
       setBusy(false);
     }
-  }, [layout, frameOverride, setLayoutUrl]);
+  }, [layout, frameOverride, setLayoutUrl, setShareUrl]);
 
   // WS 监听。用 fetchJob 轮询兜底: WS 可能在生成途中因网络/代理/后端重启
   // 断开, 而 openJobSocket 只挂了 onmessage —— 没有 onerror/onclose 时
@@ -609,12 +680,29 @@ export function DecoratePage() {
         return; // 等待 WS
       }
 
-      // 普通拼图
-      const result = await makeLayout(finalBlobs, layout, frameOverride ?? "none");
-      // 释放上一个 objectURL 再换新的: 拼图是数 MB 的 Blob, 不 revoke
-      // 的话每次点「生成拼图」都泄漏一份(旧 URL 永不释放)。
+      // 普通拼图。
+      //
+      // 这一段原先只把 collage 塞进内存 blob —— 磁盘上什么都没有, 刷新页面
+      // 拼图即消失, 贴纸册里也永远不会出现这一条。现在补上完整落盘:
+      //   1. saveCaptures 建 job 目录并存 4 张单张(它是唯一能创建 job 的入口)
+      //   2. makeLayout 带 job_id 再拼一次, 顺手写顶层 layout.jpg
+      //   3. 本地 canvas 合成 4:3 分享卡, 落盘 share.jpg
+      // 第 2 步看起来像重复劳动(第 1 步已经收过 4 张图), 但 layout.jpg 必须
+      // 由后端 collage_to_bytes 生成 —— 前端那份 blob 是同一批输入的另一次
+      // 编码, 拿它冒充 layout.jpg 会让贴纸册展示的拼图与服务端不一致。
+      setProgress({ current: 1, total: 3, msg: "正在落盘照片..." });
+      const cap = await saveCaptures(finalBlobs);
+      setProgress({ current: 2, total: 3, msg: "正在生成拼图..." });
+      const result = await makeLayoutToJob(finalBlobs, cap.job_id, layout, frameOverride);
+      setProgress({ current: 3, total: 3, msg: "正在生成分享卡..." });
+      const shareBlob = await renderShareCard(result, cap.job_id);
+      const saved = await saveShareCard(cap.job_id, shareBlob);
+      setShareUrl(saved.share_url);
+
+      // 换成**服务端路径**而不是 blob: —— 刷新页面后依然可看, 且能被分享。
+      // blob: URL 每次会话都不一样, 贴纸册/历史记录里存它等于存了个死链。
       if (layoutUrl) URL.revokeObjectURL(layoutUrl);
-      setLayoutUrl(URL.createObjectURL(result));
+      setLayoutUrl(`/outputs/${cap.job_id}/layout.jpg`);
       setBusy(false);
     } catch (e: any) {
       setError(e.message ?? String(e));
@@ -1042,12 +1130,43 @@ export function DecoratePage() {
                 <div className="font-pixel text-sm text-brick">最终拼图</div>
                 <a
                   href={layoutUrl}
+                  download
                   className="px-4 py-1.5 bg-brick text-white rounded-full text-xs"
                 >
                   下载 JPG
                 </a>
               </div>
-              <img src={layoutUrl} className="w-full rounded-lg" />
+              <img src={layoutUrl} className="w-full rounded-lg" alt="最终拼图" />
+            </div>
+          )}
+
+          {/*
+            分享卡与拼图分成两块而不是叠在一起: 拼图是"我这轮拍成什么样",
+            分享卡是"我要发出去的那一张"(固定 4:3 + 品牌 footer)。合成一张
+            意味着用户没法单独保存原始拼图。
+          */}
+          {shareUrl && (
+            <div
+              className="bg-white rounded-2xl border-2 border-pink p-4 mt-4"
+              data-share-card=""
+            >
+              <div className="flex items-center justify-between mb-2">
+                <div className="font-pixel text-sm text-brick">
+                  分享卡
+                  <span className="ml-1 font-sans text-[10px] text-brown/50">
+                    4:3 · 已落盘
+                  </span>
+                </div>
+                <a
+                  href={shareUrl}
+                  download
+                  data-share-download=""
+                  className="px-4 py-1.5 bg-pink text-white rounded-full text-xs"
+                >
+                  下载分享卡
+                </a>
+              </div>
+              <img src={shareUrl} className="w-full rounded-lg" alt="分享卡" />
             </div>
           )}
         </section>

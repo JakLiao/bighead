@@ -1,4 +1,4 @@
-import type { EraKey, Meta, JobStatus, GalleryResponse, AlbumEntry } from "./types";
+import type { EraKey, Meta, JobStatus, GalleryResponse, AlbumEntry, AlbumPatchResult, ShareSaveResult } from "./types";
 
 const API = "/api";
 
@@ -115,8 +115,22 @@ export function openJobSocket(
   return ws;
 }
 
-export async function fetchGallery(): Promise<GalleryResponse> {
-  const r = await fetch(`${API}/gallery`);
+/**
+ * 拉贴纸册。q / tag 由后端过滤(见 backend/routes/gallery.py 的 gallery())。
+ *
+ * 筛选放后端而不是前端过滤 items: 这样 ?q=xx 本身是一个可复现、可分享、
+ * 刷新后保持的链接, 而不是只在这一次的内存里生效的临时状态。
+ *
+ * 刻意**不做 debounce**: 本机自用, 条目数十量级, 每次击键打一次请求
+ * 完全无感。加 debounce 要引入 timer ref + cleanup effect, 收益要到条目
+ * 上千才出现 —— 那时再抽也不迟。这是有意识的取舍, 不是疏漏。
+ */
+export async function fetchGallery(q = "", tag = ""): Promise<GalleryResponse> {
+  const p = new URLSearchParams();
+  if (q.trim()) p.set("q", q.trim());
+  if (tag) p.set("tag", tag);
+  const qs = p.toString();
+  const r = await fetch(`${API}/gallery${qs ? `?${qs}` : ""}`);
   if (!r.ok) throw new Error(`fetchGallery ${r.status}`);
   return r.json();
 }
@@ -125,7 +139,7 @@ export async function fetchGallery(): Promise<GalleryResponse> {
 export async function patchAlbum(
   job_id: string,
   patch: Partial<AlbumEntry>,
-): Promise<AlbumEntry & { job_id: string }> {
+): Promise<AlbumPatchResult> {
   const r = await fetch(`${API}/gallery/${encodeURIComponent(job_id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -138,5 +152,25 @@ export async function patchAlbum(
 export async function deleteAlbum(job_id: string): Promise<{ job_id: string; deleted: boolean }> {
   const r = await fetch(`${API}/gallery/${encodeURIComponent(job_id)}`, { method: "DELETE" });
   if (!r.ok) throw new Error(`deleteAlbum ${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
+/**
+ * 落盘分享卡到 outputs/{job_id}/share.jpg。
+ *
+ * 传的是**前端已合成好的卡片字节**, 不是原始拼图: 服务端的
+ * backend/share_card.py 只用于「补生成历史卡片」这类没有前端上下文的场景。
+ * 正常出片时前端手里已有 collage blob 与 job_id, 本地 canvas 合成是零
+ * 往返; 让浏览器把拼图上传回服务端再合成一次是纯粹的双向往返。
+ */
+export async function saveShareCard(
+  job_id: string,
+  card: Blob,
+): Promise<ShareSaveResult> {
+  const fd = new FormData();
+  fd.append("job_id", job_id);
+  fd.append("layout", card, "share.jpg");
+  const r = await fetch(`${API}/share/save`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(`saveShareCard ${r.status}: ${await r.text()}`);
   return r.json();
 }

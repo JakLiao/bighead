@@ -87,6 +87,22 @@ export interface GalleryItem {
   updated_at: number;
 }
 
+/** 标签 + 出现次数, 供贴纸册筛选条渲染。 */
+export interface TagCount {
+  tag: string;
+  count: number;
+}
+
 export interface GalleryResponse {
   items: GalleryItem[];
+  tags: TagCount[];
+}
+
+/** PATCH 返回体。changed=false 表示内容无变化, 服务端没写盘。 */
+export type AlbumPatchResult = AlbumEntry & { job_id: string; changed: boolean };
+
+/** /api/share/save 的返回。 */
+export interface ShareSaveResult {
+  job_id: string;
+  share_url: string;
 }
