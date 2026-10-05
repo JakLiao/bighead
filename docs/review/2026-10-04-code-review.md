@@ -692,8 +692,87 @@ eslint 上线时报出 7 个 error，其中 **3 个是本次修复过程中新�
 | `verify-mask-tabs.mjs` | 21 | ✅ 全通过 | `frames` 结构改造后拍照链路 |
 | `verify-mask-gallery.mjs` | 31 | ✅ 全通过 | `imageCache` LRU 上限未改变渲染结果 |
 | `verify-gallery-capture.mjs` | 11 | ✅ 全通过 | 位图蒙版烧录 + `snap()` 出片非空 |
-| `verify-masks.mjs` | 22 | ✅ 全通过 | 蒙版镂空几何（连通块计数） |
+| `verify-masks.mjs` | 22 | ✅ 全通过 | 蒙版镂空几何(连通块计数) |
 | `verify-burst.mjs` | 1 | ✅ PASS | 连拍 4/4 完成、按钮正确释放 |
+
+---
+
+## 10. 补充:贴纸自由编排(Task 3, 2026-10-05)
+
+`feature/p0-vintage-parity` 分支新增贴纸用户编排能力:在「排版装饰」页
+(`DecoratePage`) 的编辑模态里增加「涂鸦 / 贴纸」tab,贴纸 tab 由自研
+`StickerEditor` 提供拖动/旋转/删除能力,与「涂鸦」同源安全区 (`doodleSafeArea`),
+并在 `doLayout` 中位于涂鸦**下层**烧录。
+
+### 改动清单
+
+- 新增 `frontend/src/components/stickers/stickerTypes.ts` — 贴纸数据契约
+  (`StickerPlacement`、`StickersByIndex`、可选形状白名单 `STICKER_SHAPE_KEYS`、
+  7 色调色板 `STICKER_COLORS`)。坐标 0..1、尺寸相对短边、形状取自
+  `masks/geometry.ts` 的 `STICKER_SHAPES`(不另写几何)。
+- 新增 `frontend/src/components/stickers/StickerEditor.tsx` — 自研 canvas
+  拖拽编辑器:
+  - 复用 `paintStickers`(导出函数),与 `DecoratePage.burnStickers` 共用同一份
+    渲染器,所见即所得是结构性保证而非约定。
+  - **命中测试改为中心矩形** (`|dx|<=half && |dy|<=half`), 替换任务要求前
+    的外接圆实现,与位移无关,星/心等形状的"点进贴纸内就抓到"稳定。
+  - pointer 事件 + `setPointerCapture`, 拖动期间连续写 store。
+  - Delete / Backspace 键删除选中贴纸,挂在 window 上;`isEditingText`
+    拦截 INPUT/TEXTAREA/SELECT/contenteditable,避免"在输入框里按退格把
+    贴纸删了"这类反向 bug。
+- 改 `frontend/src/store.ts`:
+  - 新增 `stickerOverrides: StickersByIndex` 与 `setStickerOverrides` /
+    `clearStickerOverrides`(删 key 而非置空,与 `clearDoodle` 同源)。
+  - `reset` 一并清空,确保新一轮连拍时上一轮贴纸不会"继承"到新照片。
+- 改 `frontend/src/pages/DecoratePage.tsx`:
+  - 编辑模态新增 tab 切换(`editTab: "doodle" | "sticker"`),两 tab 状态完全
+    独立,切 tab 不清任何 store。
+  - 侧栏新增贴纸计数卡片 + 「清空当前这张贴纸」按钮(进编辑后才显示)。
+  - 缩略图新增「N 贴」角标(贴纸靠左、笔迹靠右,两角不互盖)。
+  - `doLayout` 中**贴纸在下、涂鸦在上**的串行烧录顺序,与编辑模态的视觉
+    一致(用户先摆贴纸,再在照片上画,笔迹是最后落在纸面上的)。两层按
+    "marked 下标 + 单循环串行" 实现,层序隐式约定被消除:分两个循环会让
+    层序静默翻转却无断言能发现。
+  - `burnStickers` 与 `burnDoodles` 同构:独立透明 canvas + JPEG 重编码,
+    try/finally 释放 `ImageBitmap`,避免一次抛错泄漏 4.7MB/张。
+  - 安全区文案改 `safeText(safeArea, noun)` 可变 noun,贴纸 tab 显示
+    「贴纸」、涂鸦 tab 显示「笔迹」,共用同一句事实陈述。
+
+### 端到端回归
+
+新增 `frontend/verify-sticker-edit.mjs`,60 项断言,全部通过:
+
+| 脚本 | 断言数 | 结果 | 关键覆盖 |
+| --- | --- | --- | --- |
+| `verify-sticker-edit.mjs`(新) | 60 | ✅ 全通过 | tab 切换、3 色块烧录、中心矩形命中、Delete/Backspace、输入框内不拦截、安全区按排版切换、边缘裁切、reset 清空 |
+
+回归原 10 个脚本全部仍然全过:
+
+| 脚本 | 断言数 | 结果 |
+| --- | --- | --- |
+| `verify-camera.mjs` | 7 | ✅ 全通过 |
+| `verify-mask-preview.mjs` | 14 | ✅ 全通过 |
+| `verify-mask-output.mjs` | 37 | ✅ 全通过 |
+| `verify-mask-tabs.mjs` | 21 | ✅ 全通过 |
+| `verify-mask-gallery.mjs` | 31 | ✅ 全通过 |
+| `verify-gallery-capture.mjs` | 11 | ✅ 全通过 |
+| `verify-masks.mjs` | 22 | ✅ 全通过 |
+| `verify-burst.mjs` | 1 | ✅ PASS |
+| `verify-doodle-burn.mjs` | 58 | ✅ 全通过 |
+| `verify-era-e2e.mjs` | 19 | ✅ 全通过 |
+
+合计 281 项断言,0 失败;`tsc -b --force` 0 错误;`eslint src` 0 error
+(仅 1 个与本次无关的 CountdownOverlay 预存 warning)。
+
+### 过程中遇到并修复的两个问题
+
+1. **place() 时序受 selected 影响**:`StickerEditor` 的色板按钮同时调
+   `setColor` 与 `recolorSelected`。place 第一颗贴纸后默认选中,
+   第二次 place 时颜色按钮会**改掉上一颗的颜色**而非设置下一颗要用的色。
+   修复:place() 先切到 select 工具并点画布角落清掉 selected,再选色。
+2. **关闭/重开模态后坐标过期**: 旧测试用脚本顶层缓存的 `boundingBox`
+   与 `at()`,模态重开后 `place()` 落在画布外导致 hitTest 全部 -1。
+   修复:place() 每次重新读 `boundingBox`。
 
 ### 回归中发现并修复的问题
 

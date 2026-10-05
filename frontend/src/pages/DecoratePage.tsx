@@ -23,9 +23,12 @@ import {
   DOODLE_WIDTHS,
   doodleSafeArea,
   type DoodleLayoutGeom,
+  type DoodleSafeArea,
   type DoodleStroke,
   type DoodleTool,
 } from "../components/doodles/doodleTypes";
+import { StickerEditor, paintStickers } from "../components/stickers/StickerEditor";
+import type { StickerPlacement } from "../components/stickers/stickerTypes";
 
 /** 拼图最多用几张(与 HomePage 的连拍张数一致)。 */
 const PHOTO_COUNT_FOR_LAYOUT = 4;
@@ -99,6 +102,53 @@ async function burnDoodles(photoBlob: Blob, strokes: DoodleStroke[]): Promise<Bl
 
     // toBlob 在 canvas tainted 或尺寸超限时给 null, 回落原图而不是抛错 ——
     // 烧录失败不该让用户丢掉整轮照片。
+    const burned = await new Promise<Blob | null>((resolve) =>
+      out.toBlob(resolve, "image/jpeg", 0.92),
+    );
+    return burned ?? photoBlob;
+  } finally {
+    bitmap.close();
+  }
+}
+
+/**
+ * 把用户摆的贴纸烧进照片, 返回新 Blob。
+ *
+ * 复用 paintStickers(与 StickerEditor 同一个渲染器), 保证"摆时看到的那颗"
+ * 与"这里烧进去的那颗"一致 —— 与 burnDoodles 是同一条策略。
+ *
+ * 同样隔一层透明 canvas 再贴: 贴纸有 opacity 字段, 直接画在照片上时
+ * 半透明贴纸会把照片一起调淡, 等于给整张照片加了层滤镜。隔一层之后
+ * 半透明只作用在贴纸自己身上。
+ *
+ * selected 传 -1: 选中虚线框是编辑器 UI, 绝不能烧进成片。
+ *
+ * try/finally 释放 ImageBitmap 的理由与 burnDoodles 完全相同(createImageBitmap
+ * 是显式资源, 不 close 不会自动回收, 一次抛错就泄漏 4.7MB)。
+ */
+async function burnStickers(
+  photoBlob: Blob,
+  stickers: StickerPlacement[],
+): Promise<Blob> {
+  if (stickers.length === 0) return photoBlob;
+  const bitmap = await createImageBitmap(photoBlob);
+  try {
+    const w = bitmap.width;
+    const h = bitmap.height;
+
+    const layer = document.createElement("canvas");
+    layer.width = w;
+    layer.height = h;
+    paintStickers(layer.getContext("2d"), stickers);
+
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext("2d");
+    if (!ctx) return photoBlob;
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    ctx.drawImage(layer, 0, 0);
+
     const burned = await new Promise<Blob | null>((resolve) =>
       out.toBlob(resolve, "image/jpeg", 0.92),
     );
@@ -194,16 +244,20 @@ function DoodleToolbar({ color, tool, width, onColor, onTool, onWidth }: Toolbar
  * 后者是旧文案且是错的: 落在裁切窗口外的笔迹会被 _smart_crop 静默切掉。
  * 百分比带"约"字: 安全区按几何中心算, 检到人脸时后端 focus 会平移窗口
  * (见 doodleSafeArea 的局限说明), 精确到个位会显得比实际更可信。
+ *
+ * 涂鸦与贴纸共用这一句: 两层都由同一个 doodleSafeArea 推导, 提示必须
+ * 一致 —— 贴纸单独写一份文案, 就会出现"笔迹说会被裁、贴纸说不会"的矛盾。
+ * `noun` 让提示指向当前 tab 在编辑的东西, 而不写死"笔迹"。
  */
-function safeText(s: { top: number; right: number; bottom: number; left: number }): string {
+function safeText(s: DoodleSafeArea, noun: string): string {
   const pct = (v: number) => Math.round(v * 100);
   const parts: string[] = [];
   if (s.left > 0) parts.push(`左 ${pct(s.left)}%`);
   if (s.right > 0) parts.push(`右 ${pct(s.right)}%`);
   if (s.top > 0) parts.push(`上 ${pct(s.top)}%`);
   if (s.bottom > 0) parts.push(`下 ${pct(s.bottom)}%`);
-  if (parts.length === 0) return "当前排版不裁切画面, 笔迹都会保留";
-  return `压暗区(${parts.join(" / ")})不会被保留`;
+  if (parts.length === 0) return `当前排版不裁切画面, ${noun}都会保留`;
+  return `压暗区(${parts.join(" / ")})内的${noun}不会被保留`;
 }
 
 export function DecoratePage() {
@@ -274,6 +328,20 @@ export function DecoratePage() {
     () => Object.values(doodles).reduce((n, list) => n + list.length, 0),
     [doodles],
   );
+  // 贴纸: 与涂鸦同构 —— 摆放结果进 store(要活到 doLayout), 形状/颜色留在
+  // StickerEditor 内部(它们只是"接下来放什么"的编辑态, 不影响已成片的层)。
+  const stickerOverrides = useStore((s) => s.stickerOverrides);
+  const setStickerOverrides = useStore((s) => s.setStickerOverrides);
+  const clearStickerOverrides = useStore((s) => s.clearStickerOverrides);
+  const stickerTotal = useMemo(
+    () => Object.values(stickerOverrides).reduce((n, list) => n + list.length, 0),
+    [stickerOverrides],
+  );
+  // 编辑模态里当前在编辑哪一层。两个 tab 共享同一个模态与同一张照片,
+  // 但**各自独立的画布与 store key** —— 涂鸦与贴纸都挂在同一个下标上,
+  // 切 tab 不能清掉对方已摆好的东西(这是切 tab 最容易犯的错:
+  // 卸载 DoodleCanvas 时顺手把 doodles[idx] 也清了)。
+  const [editTab, setEditTab] = useState<"doodle" | "sticker">("doodle");
   // 相框已在取景阶段烧进照片。本页的"相框"选择改为「额外再套一层」,
   // 默认 none,即保持所见即所得的结果不变。想换框请回取景页重拍。
   const [frameOverride, setFrameOverride] = useState<string | null>(null);
@@ -462,36 +530,57 @@ export function DecoratePage() {
       const blobs = await Promise.all(
         frames.map((f) => dataUrlToBlob(f.url))
       );
-      // 涂鸦烧录。位置很关键: 必须在滤镜/年代**之前**。
-      // 这样笔迹会跟着整张图一起被处理(颗粒、漏光、暗角一视同仁), 也就是
-      // 用户"在成片上手写"的真实预期; 反过来先烧滤镜再叠笔迹, 笔迹会
-      // 浮在一层被处理过的画面上, 与编辑模态里看到的(原图上的笔迹)对不上。
+      // 装饰烧录(贴纸 + 涂鸦)。位置很关键: 必须在滤镜/年代**之前**。
+      // 这样装饰会跟着整张图一起被处理(颗粒、漏光、暗角一视同仁), 也就是
+      // 用户"在成片上手写/贴"的真实预期; 反过来先烧滤镜再叠装饰, 装饰会
+      // 浮在一层被处理过的画面上, 与编辑模态里看到的对不上。
       //
-      // 串行而非 Promise.all: 每张 burnDoodles 同时持有 1 个 ImageBitmap
-      // + 3 张全尺寸 canvas(1280x960x4 ≈ 4.7MB/张)。四张并发就是峰值
-      // ~75MB 的瞬时分配, 在移动端 Safari 上足以触发标签页被杀;
-      // 串行把这个峰值压到单张的量级。顺带能把进度真实报出来 ——
-      // Promise.all 期间进度条只能干瞪眼, 用户点完按钮后面对一个
-      // 不动的界面, 只能靠"是不是卡了"的猜测来决定要不要等。
+      // **层序: 贴纸在下、涂鸦在上。**
+      // 依据是用户的心智模型与编辑模态里的视觉一致: 模态是"先摆贴纸、
+      // 再在照片上写字", 笔迹是最后落在纸面上的。若反过来(涂鸦在下),
+      // 用户画的一道笔迹会被一颗后摆的贴纸盖住, 而他在模态里明明看到
+      // 笔迹压在贴纸之上 —— 预览与成片的层序会对调, 这类不一致最难排查。
+      //
+      // 串行而非 Promise.all: 每张图同时持有 1 个 ImageBitmap + 3 张全尺寸
+      // canvas(1280x960x4 ≈ 4.7MB/张)。四张并发就是峰值 ~75MB 的瞬时分配,
+      // 在移动端 Safari 上足以触发标签页被杀; 串行把这个峰值压到单张的
+      // 量级。顺带能把进度真实报出来 —— Promise.all 期间进度条只能干瞪眼,
+      // 用户点完按钮后面对一个不动的界面, 只能靠"是不是卡了"的猜测来决定
+      // 要不要等。
       const stamped = [...blobs];
-      // 只烧"这一帧真有笔迹"的下标。必须显式列出而不能对 doodles 做 map:
-      // doodles 是 DoodlesByIndex = Record<number, DoodleStroke[]>(见
-      // doodleTypes), 是稀疏字典而非数组, 对它 .map 会直接抛
+      // 只烧"这一帧真有装饰"的下标。必须显式列出而不能对 doodles /
+      // stickerOverrides 做 map: 两者都是 Record<number, T[]>(见 doodleTypes
+      // 与 stickerTypes), 是稀疏字典而非数组, 对它 .map 会直接抛
       // "Property 'map' does not exist"。同时按 blobs 的长度收敛 ——
       // 用户可能给第 5 张画了笔而当前只有 4 帧, 多出来的下标会让
       // stamped 长度超过 blobs, 后面 applyFilter 就会拿到 undefined。
+      //
+      // 两层都只列出下标、由同一个循环按贴纸→涂鸦的顺序串行烧, 而不是
+      // 写成两个独立的循环: 分成两个循环的话, "先贴纸后涂鸦"的层序就变成
+      // 了隐式约定 —— 一旦有人把两个循环调换位置, 层序会静默翻转, 且没有任何
+      // 断言能发现(每层单独看都是对的)。
       const marked: number[] = [];
       for (let i = 0; i < blobs.length; i++) {
-        if (doodles[i]?.length) marked.push(i);
+        if (stickerOverrides[i]?.length || doodles[i]?.length) marked.push(i);
       }
       for (let n = 0; n < marked.length; n++) {
         const i = marked[n];
+        const hasSticker = !!stickerOverrides[i]?.length;
+        const hasDoodle = !!doodles[i]?.length;
+        // 进度以"帧"为粒度, 与涂鸦时代的口径保持一致(total = 待烧帧数)。
+        // 一帧里两层都烧时不再细分: 帧内串行的耗时远小于一次 HTTP 往返,
+        // 细分只会让进度文字在用户眼前闪一下, 反而更难读。
         setProgress({
           current: n + 1,
           total: marked.length,
-          msg: `正在烧录涂鸦 ${n + 1}/${marked.length}`,
+          msg: `正在烧录装饰 ${n + 1}/${marked.length}`,
         });
-        stamped[i] = await burnDoodles(blobs[i], doodles[i]);
+        // 关键: 第二层必须以**第一层的输出**为输入, 否则贴纸会被涂鸦
+        // 覆盖掉(而不是叠上去), 层序就反了。
+        let cur = blobs[i];
+        if (hasSticker) cur = await burnStickers(cur, stickerOverrides[i]);
+        if (hasDoodle) cur = await burnDoodles(cur, doodles[i]);
+        stamped[i] = cur;
       }
       const needFilter = frames.some((f) => !f.burnedIn);
       // era 必须与 preset 走同一趟后端: burnedIn 只保证「滤镜」已烧, 不含年代。
@@ -701,6 +790,30 @@ export function DecoratePage() {
             )}
           </div>
 
+          {/* 贴纸。侧栏只放计数与"清空当前这张", 形状/色板在编辑模态里
+              (StickerEditor 自带工具条) —— 摆贴纸是"看着照片点"的动作,
+              工具条必须贴着画布, 侧栏这套离点按位置太远。 */}
+          <div className="bg-white rounded-2xl border-2 border-pink p-4" data-sticker-scope="sidebar">
+            <div className="font-pixel text-sm text-brick mb-2">贴纸</div>
+            <div className="text-[10px] text-brown/60 mb-2" data-sticker-count={stickerTotal}>
+              点上方照片进入编辑 → 选形状 → 点落点 · 共 {stickerTotal} 个
+            </div>
+            <div className="text-[10px] text-brown/60">
+              贴纸在点「生成拼图」时烧进照片, 位于涂鸦下层
+            </div>
+            {editingIdx !== null && (
+              <button
+                type="button"
+                data-sticker-clear=""
+                disabled={!stickerOverrides[editingIdx]?.length}
+                onClick={() => clearStickerOverrides(editingIdx)}
+                className="mt-2 w-full rounded border border-pink px-2 py-1 text-xs text-brown hover:bg-pink/20 disabled:opacity-40"
+              >
+                清空这张贴纸
+              </button>
+            )}
+          </div>
+
           {/* 生成按钮 */}
           <button
             onClick={() => doLayout(aiEnabled)}
@@ -747,6 +860,10 @@ export function DecoratePage() {
         <section>
           {editingIdx !== null && displayImages[editingIdx] && (
             <div
+              data-edit-modal=""
+              // data-doodle-modal 保留: 编辑模态原本只服务涂鸦, 现有端到端
+              // 脚本(verify-doodle-burn.mjs)靠它定位模态。改成双 tab 后沿用
+              // 同一个遮罩元素, 免得为一个纯测试钩子去改既有脚本的语义。
               data-doodle-modal=""
               className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
               onClick={() => setEditingIdx(null)}
@@ -757,7 +874,7 @@ export function DecoratePage() {
               >
                 <div className="mb-3 flex items-center justify-between">
                   <div className="font-pixel text-sm text-brick">
-                    编辑涂鸦 #{editingIdx + 1}
+                    编辑{editTab === "doodle" ? "涂鸦" : "贴纸"} #{editingIdx + 1}
                   </div>
                   <button
                     type="button"
@@ -768,41 +885,104 @@ export function DecoratePage() {
                   </button>
                 </div>
 
-                <div data-doodle-scope="modal">
-                  <DoodleToolbar
-                    color={doodleColor}
-                    tool={doodleTool}
-                    width={doodleWidth}
-                    onColor={setDoodleColor}
-                    onTool={setDoodleTool}
-                    onWidth={setDoodleWidth}
-                  />
+                {/*
+                  涂鸦 / 贴纸两个 tab 共用这一个模态与同一张照片, 但**状态完全
+                  独立**: 涂鸦进 doodles[idx], 贴纸进 stickerOverrides[idx]。
+                  切 tab 只切渲染, 不动任何 store —— 否则用户在涂鸦 tab 画了
+                  两笔, 切去贴纸 tab 再切回来会发现笔迹没了。
+                */}
+                <div className="mb-3 flex gap-1.5">
+                  {(
+                    [
+                      { k: "doodle", label: "涂鸦", n: doodles[editingIdx]?.length ?? 0 },
+                      {
+                        k: "sticker",
+                        label: "贴纸",
+                        n: stickerOverrides[editingIdx]?.length ?? 0,
+                      },
+                    ] as const
+                  ).map((t) => (
+                    <button
+                      key={t.k}
+                      type="button"
+                      data-edit-tab={t.k}
+                      aria-pressed={editTab === t.k}
+                      onClick={() => setEditTab(t.k)}
+                      className={`rounded-full px-3 py-1 text-xs transition ${
+                        editTab === t.k
+                          ? "bg-brick text-white"
+                          : "border border-pink bg-cream text-brown hover:bg-pink/30"
+                      }`}
+                    >
+                      {t.label}
+                      {t.n > 0 ? ` ${t.n}` : ""}
+                    </button>
+                  ))}
                 </div>
 
-                <div className="mt-3 flex justify-center">
-                  <DoodleCanvas
-                    src={displayImages[editingIdx]}
-                    strokes={doodles[editingIdx] ?? []}
-                    color={doodleColor}
-                    tool={doodleTool}
-                    brush={doodleWidth}
-                    onChange={(next) => setDoodles(editingIdx, next)}
-                    width={DOODLE_EDIT_W}
-                    height={DOODLE_EDIT_H}
-                    safe={safeArea}
-                  />
-                </div>
+                {editTab === "doodle" ? (
+                  <>
+                    <div data-doodle-scope="modal">
+                      <DoodleToolbar
+                        color={doodleColor}
+                        tool={doodleTool}
+                        width={doodleWidth}
+                        onColor={setDoodleColor}
+                        onTool={setDoodleTool}
+                        onWidth={setDoodleWidth}
+                      />
+                    </div>
 
-                <div className="mt-3 text-[10px] text-brown/60">
-                  在照片上按住拖动即可落笔 · 橡皮可擦掉已画的笔迹 ·
-                  笔迹在点「生成拼图」时烧进照片 ·{" "}
-                  <span className="text-brick" data-doodle-safe-text="">
-                    {safeText(safeArea)}
-                  </span>
-                  {doodles[editingIdx]?.length
-                    ? ` · 当前这张 ${doodles[editingIdx].length} 笔`
-                    : ""}
-                </div>
+                    <div className="mt-3 flex justify-center">
+                      <DoodleCanvas
+                        src={displayImages[editingIdx]}
+                        strokes={doodles[editingIdx] ?? []}
+                        color={doodleColor}
+                        tool={doodleTool}
+                        brush={doodleWidth}
+                        onChange={(next) => setDoodles(editingIdx, next)}
+                        width={DOODLE_EDIT_W}
+                        height={DOODLE_EDIT_H}
+                        safe={safeArea}
+                      />
+                    </div>
+
+                    <div className="mt-3 text-[10px] text-brown/60">
+                      在照片上按住拖动即可落笔 · 橡皮可擦掉已画的笔迹 ·
+                      笔迹在点「生成拼图」时烧进照片 ·{" "}
+                      <span className="text-brick" data-doodle-safe-text="">
+                        {safeText(safeArea, "笔迹")}
+                      </span>
+                      {doodles[editingIdx]?.length
+                        ? ` · 当前这张 ${doodles[editingIdx].length} 笔`
+                        : ""}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="mt-3 flex justify-center">
+                      <StickerEditor
+                        src={displayImages[editingIdx]}
+                        stickers={stickerOverrides[editingIdx] ?? []}
+                        onChange={(next) => setStickerOverrides(editingIdx, next)}
+                        width={DOODLE_EDIT_W}
+                        height={DOODLE_EDIT_H}
+                        safe={safeArea}
+                      />
+                    </div>
+
+                    <div className="mt-3 text-[10px] text-brown/60">
+                      选形状后点照片落点新增 · 拖动可移动 · ↺↻ 旋转 ·
+                      Delete 删除 · 贴纸在点「生成拼图」时烧进照片(位于笔迹下层) ·{" "}
+                      <span className="text-brick" data-sticker-safe-text="">
+                        {safeText(safeArea, "贴纸")}
+                      </span>
+                      {stickerOverrides[editingIdx]?.length
+                        ? ` · 当前这张 ${stickerOverrides[editingIdx].length} 个`
+                        : ""}
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -817,7 +997,7 @@ export function DecoratePage() {
                 key={`${i}:${src}`}
                 data-doodle-thumb={i}
                 onClick={() => setEditingIdx(i)}
-                title="点击编辑这张的涂鸦"
+                title="点击编辑这张的涂鸦与贴纸"
                 // 比例必须与编辑模态的画布一致(4:3 = CAPTURE_ASPECT):
                 // 缩略图用 object-cover, 若容器是 3/4 则显示的是**被裁过的**
                 // 画面, 与进模态后看到的整张照片对不上, 用户会以为笔迹位置
@@ -838,6 +1018,18 @@ export function DecoratePage() {
                     className="absolute right-1 top-1 rounded-full bg-brick px-1.5 py-0.5 text-[10px] text-white"
                   >
                     {doodles[i].length} 笔
+                  </span>
+                ) : null}
+                {/*
+                  贴纸角标靠左: 笔迹角标固定在右上, 两层都要显示时叠在同一个
+                  角上会互相盖住, 用户只能看到其中一种装饰的存在。
+                */}
+                {stickerOverrides[i]?.length ? (
+                  <span
+                    data-sticker-badge={i}
+                    className="absolute left-1 top-1 rounded-full bg-brick px-1.5 py-0.5 text-[10px] text-white"
+                  >
+                    {stickerOverrides[i].length} 贴
                   </span>
                 ) : null}
               </button>

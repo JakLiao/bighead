@@ -1,6 +1,10 @@
 import { create } from "zustand";
 import type { FilterInfo, FilterKey, FrameInfo, FrameKey, LayoutKey, StyleKey } from "./types";
 import type { DoodleStroke, DoodlesByIndex } from "./components/doodles/doodleTypes";
+import type {
+  StickerPlacement,
+  StickersByIndex,
+} from "./components/stickers/stickerTypes";
 
 /**
  * 一张连拍照。
@@ -49,6 +53,17 @@ export interface CaptureState {
    * 靠 useEffect 手动清理, 漏一次就会出现"上一轮的笔迹烧进这一轮的照片"。
    */
   doodles: DoodlesByIndex;
+  /**
+   * 每张照片**额外**摆放的贴纸, key 是 frames 数组下标。
+   *
+   * 与 doodles 同样的理由进 store(见上条注释): 下标会随 frames 整体换掉,
+   * 残留的旧下标会被新照片"继承"。reset 必须一并清 —— 见 reset 的注释。
+   *
+   * 与蒙版贴纸的分工: 蒙版(maskDefs.stickers)里的贴纸是取景期硬编码的装饰,
+   * 已在拍照时烧进照片(burnedIn); 这里是用户在排版页自己摆的, 走
+   * DecoratePage.burnStickers 单独烧一层。
+   */
+  stickerOverrides: StickersByIndex;
   setFrames: (f: Frame[]) => void;
   setCurrentJobId: (id: string | null) => void;
   setFilter: (f: FilterKey) => void;
@@ -68,6 +83,10 @@ export interface CaptureState {
   setDoodles: (idx: number, strokes: DoodleStroke[]) => void;
   /** 丢掉第 idx 张照片的涂鸦, 回到"没画过" */
   clearDoodle: (idx: number) => void;
+  /** 覆盖第 idx 张照片的贴纸(整体替换, 编辑器每次改动调用一次) */
+  setStickerOverrides: (idx: number, list: StickerPlacement[]) => void;
+  /** 丢掉第 idx 张照片的贴纸, 回到"没摆过" */
+  clearStickerOverrides: (idx: number) => void;
   reset: () => void;
 }
 
@@ -92,6 +111,7 @@ export const useStore = create<CaptureState>((set) => ({
   maskKey: "heart",
   maskGalleryOpen: false,
   doodles: {},
+  stickerOverrides: {},
   setFrames: (f) => set({ frames: f }),
   setCurrentJobId: (id) => set({ currentJobId: id }),
   setFilter: (f) => set({ filter: f }),
@@ -117,12 +137,26 @@ export const useStore = create<CaptureState>((set) => ({
       delete next[idx];
       return { doodles: next };
     }),
+  setStickerOverrides: (idx, list) =>
+    set((s) => ({ stickerOverrides: { ...s.stickerOverrides, [idx]: list } })),
+  // 与 clearDoodle 同理删 key: "没摆过"用缺 key 表示, doLayout 侧
+  // `stickerOverrides[i]?.length` 一处判断就够, 不用额外维护空数组。
+  clearStickerOverrides: (idx) =>
+    set((s) => {
+      if (!(idx in s.stickerOverrides)) return s;
+      const next = { ...s.stickerOverrides };
+      delete next[idx];
+      return { stickerOverrides: next };
+    }),
   // 开始新一轮连拍时清掉上一轮的成片。DecoratePage 的 layoutUrl 可能是
   // blob: URL, 这里只置空 —— 真正的 revoke 在 DecoratePage 的卸载 effect 里做,
   // 因为那里才知道当前值是不是自己创建的 blob。
   // doodles 必须一起清: 涂鸦按 frames 下标索引, 而 frames 会被整体换掉,
-  // 残留的旧下标会被新照片"继承"—— 上一轮写在第 2 张的笔迹会烧到这一轮
+  // 上一轮写在第 2 张的笔迹会烧到这一轮
   // 的第 2 张上, 用户完全无法解释这个现象。
+  // stickerOverrides 同理, 且**必须**一起清: 贴纸同样按 frames 下标索引。
+  // 只清 doodles 不清贴纸, 会出现更隐蔽的症状 —— 新一轮照片上凭空多出
+  // 上一轮摆的贴纸, 而用户在新一轮里一个贴纸都没摆过。
   reset: () =>
     set({
       frames: [],
@@ -130,6 +164,7 @@ export const useStore = create<CaptureState>((set) => ({
       aiImages: [],
       layoutUrl: null,
       doodles: {},
+      stickerOverrides: {},
     }),
 }));
 
