@@ -1007,3 +1007,224 @@ eslint src                                 → 0 error, 1 warning（既有, Coun
   肉眼看图定的。真实观感建议出图后人工确认一次；调整只需改 config，
   不必再动 `filters.py`。
 
+---
+
+# Task 2：手写涂鸦层（2026-10-05，分支 feature/p0-vintage-parity）
+
+实现 `88c2f52`，审查修复 `2189d84`。
+
+## 1. 计划里的一个必然编译不过的 bug
+
+计划给的 `DoodleCanvas` props 同时声明了两个 `width`：
+
+```ts
+interface Props {
+  width: number;   // 笔刷宽
+  width: number;   // 容器宽
+}
+```
+
+实读时发现并改为 `brush` / `width` / `height`。计划是照「组件还没写」写的，
+这类细节对不上是预期内的——**关键是实读而不是照抄**。
+
+## 2. 核心设计：预览=出片靠共用一份渲染代码
+
+`paintDoodleStrokes` 是全仓唯一的涂鸦渲染实现，编辑模态与烧录都调它。
+它**从 `ctx.canvas` 直读尺寸，不接受外部传 w/h**——从签名上根除
+「预览传 640、成片传 1280 忘了换算」整类 bug。
+
+笔刷基准取「短边 960」（`DOODLE_BASE`）正好同时等于成片短边（1280×960）
+与编辑 canvas 的 backing store 短边（640×2），所以同一个 `width: 14` 在
+预览与成片上**逐像素相等**，不需要换算系数。取短边而非长边是鲁棒性的来源：
+即使将来出片改竖构图，两者也会同时偏移、**仍然相等**。
+
+## 3. 橡皮为什么不能直接画在照片上
+
+`destination-out` 擦的是「目标画布上已有的一切」。直接作用于照片会把照片
+擦成透明洞，导成 JPEG 就是一块白/黑——用户想擦掉一笔笔迹，结果在照片上
+开了个洞。做法是先画**独立透明层**再整体合成，橡皮只能擦到同一层里的笔迹，
+擦完露出来的是照片。这条已写成 e2e 断言：B 带擦完后必须仍是
+`rgb(128,128,128)` 而非白洞/黑洞。
+
+## 4. 审查发现的最严重问题：144 项全绿掩盖了一个真实 bug
+
+后端 [_smart_crop](file:///f:/Trae-work/bighead/backend/layouts.py#L69-L107)
+是 **cover 式裁切**。1280×960 塞进 0.75 比例的 cell，左右各裁掉 **21.7%**
+——用户画在画面边缘的笔迹**会静默消失**，而提示文案写着「所有笔迹在点生成
+拼图时烧进最终图」，这是**事实性错误**。
+
+最值得警惕的是：测试脚本里有一行注释
+
+```js
+// x 收在 0.30~0.70, 落在 cover 裁切保留的 0.217~0.784 内 —— 画到边上会在这里被后端裁掉。
+```
+
+**测试刻意绕开了被裁区域，等于把缺陷藏进了测试盲区。** 如果只看
+「39 项全过」，这个 bug 会一路带到用户手上。这是本轮最值得记住的一条：
+**断言全绿不等于缺陷不存在，有时是缺陷被藏进了断言的选点里。**
+
+### 修法不是换个常数
+
+逐个排版实算后发现 `6inch_4p` 的 cell 是 705×415（比例 **1.6988**），比照片
+还宽，`_smart_crop` 走的是**裁上下**分支（上 2.8% / 下 18.8%），横向一点
+不裁。**原来的左右两条遮罩对这个排版指错了方向**：既遮了不会丢的左右，
+又把本该保留的左右边缘标成「会丢」。
+
+最终改成按所选排版镜像 `make_collage` 的整数算术动态算**四边**安全区
+（`doodleSafeArea`），并新增一条「故意画到 `x=0.02`」的回归断言把缺陷钉死。
+文案统一用「约」字——只在 `_face_focus` 落几何中心时准确，检到人脸时裁切
+窗口会平移，而前端拿不到后端人脸框，不谎称精确边界。
+
+## 5. 其余修复
+
+| 项 | 问题 | 修法 |
+| --- | --- | --- |
+| H2 | `ImageBitmap.close()` 在异常路径永不执行，一次失败泄漏 4.7MB/张，连拍几轮足以让移动端标签页被系统杀掉 | `try/finally` |
+| M1 | 每个 `pointermove` 全量重绘所有笔画 | 0.002 最小间距去重 + rAF 合帧 |
+| M2 | `Promise.all` 造成 4 倍主线程峰值且 UI 无反馈 | 改串行 + 逐步 `setProgress` |
+| M2b | 进度条渲染条件被 `aiEnabled` 挡住，普通「生成拼图」看不到反馈 | 放开为 `busy && progress.total > 0` |
+| L2 | `TOOL_MAP` 声明成 `Record` 使 `?? 兜底` 成编译器死代码 | 改 `Partial<Record<>>` |
+| L3 | 缩略图 `key={i}` 未随 `displayImages` 变化重置 | key 掺入 src |
+
+### 顺带修掉一个必崩 bug
+
+修 H1 过程中 `tsc` 暴露 `doodles` 是 `Record<number, DoodleStroke[]>`，
+对稀疏字典 `.map` 会抛 `does not exist`。已改按 `blobs` 长度显式遍历，
+同时修掉「给不存在的第 N 帧画了笔会让 `stamped` 超出 `blobs`、
+`applyFilter` 拿到 `undefined`」的越界。
+
+---
+
+# Task 3：贴纸自由编排（2026-10-05，分支 feature/p0-vintage-parity）
+
+实现 `59d88a6`，审查修复 `0fb713d`。
+
+## 1. 复用而非重写
+
+Task 2 已建好 `cellRatio` / `doodleSafeArea`，直接复用——贴纸的安全区与
+涂鸦用**同一套几何**，不存在两套算法漂移的可能。形状则复用
+`masks/geometry.ts` 的 `STICKER_SHAPES`。
+
+层序：贴纸在下、涂鸦在上，`doLayout` 里单循环串行
+（`if (hasSticker) burnStickers(); if (hasDoodle) burnDoodles();`），
+第二层以第一层输出为输入。`paintStickers` 与 `paintDoodleStrokes` 同构——
+尺寸都从 `ctx.canvas` 读，保证「预览=成片」是结构性保证而非人工对齐。
+
+## 2. 审查发现的两个真问题
+
+### H1：hitTest 不跟旋转
+
+`paintSticker` 做了 `translate → rotate → scale`，心形旋转 30° 后视觉上真的
+翘起；但 `hitTest` 用轴对齐包围盒，用户想从**翘出的尖角**把贴纸抓起来
+调位置，点过去返回 -1。**最常见的用法恰恰是斜着贴**，这会立刻触发大量
+「我已经点了怎么没反应」。
+
+修法是把 `(dx,dy)` 绕贴纸中心**逆旋转** `s.rotation` 度再做轴对齐判定。
+比外接圆更准，且 `rotation=0` 时逐字节退化为原行为。
+
+### H2：拖动期间每帧写 store
+
+`onPointerMove` 每个事件都 `onChange(next)` 写进 zustand 全局 store。
+120 Hz 屏下连发 200ms = 24 次全量 React 调度 + 24 次 canvas 全画，
+4 张图叠加时移动端发木。
+
+值得注意的是，作者**自己**在 `dragRef` 处写了注释说「放 ref 不放 state」，
+但 `onPointerMove` 一行就绕回 store——**设计意图与实现之间出现鸿沟**。
+H1 + H2 是同一类失败模式：「知道该用 local store，但只做到一半」。
+
+修法：拖动期间只写 `dragRef.current.localX/Y`，`repaint` 用本地 ref +
+stickers 合成那一颗的当前帧，**pointerup 时才一次性 `onChange` 写回**。
+新增断言验证拖动期间 `storeWrites === 0`、up 后 `=== 1`。
+
+## 3. 其余修复
+
+| 项 | 问题 | 修法 |
+| --- | --- | --- |
+| M1 | canvas 的 pointerdown/click 冒泡到外层触发 `setEditingIdx(null)` 关模态 | 两处 `stopPropagation` |
+| M2 | `pointercancel` 后再 `releasePointerCapture` 抛 `InvalidStateError` | `try/catch` 静默吃掉 |
+| M5 | 四边安全区遮罩被色板工具栏视觉遮挡 | 遮罩 `z-20` 抬到工具栏之上 |
+
+---
+
+# Task 4：全量门禁与收口（2026-10-05）
+
+## 1. 依赖预检
+
+```
+PY= E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe
+OK
+```
+
+## 2. 四道门禁
+
+| 门禁 | 结果 |
+| --- | --- |
+| `ruff check backend scripts` | All checks passed! |
+| `compileall -q backend scripts` | exit 0 |
+| `tsc -b --force` | exit 0 |
+| `eslint src` | 0 error, 1 warning |
+
+唯一的 eslint warning 在 [CountdownOverlay.tsx:39](file:///f:/Trae-work/bighead/frontend/src/components/CountdownOverlay.tsx#L39)
+（`react-hooks/set-state-in-effect`），**改动前既有问题**，本轮全程未触碰该文件。
+
+## 3. 全部 11 个验证脚本：290 项断言 0 失败
+
+| 脚本 | 断言 | 结果 |
+| --- | --- | --- |
+| `verify-camera.mjs` | 7 | 通过 |
+| `verify-burst.mjs` | 1 | 通过 |
+| `verify-mask-preview.mjs` | 14 | 通过 |
+| `verify-mask-output.mjs` | 37 | 通过 |
+| `verify-mask-tabs.mjs` | 21 | 通过 |
+| `verify-mask-gallery.mjs` | 31 | 通过 |
+| `verify-masks.mjs` | 22 | 通过 |
+| `verify-gallery-capture.mjs` | 11 | 通过 |
+| `verify-era-e2e.mjs`（新） | 19 | 通过 |
+| `verify-doodle-burn.mjs`（新） | 58 | 通过 |
+| `verify-sticker-edit.mjs`（新） | 69 | 通过 |
+| **合计** | **290** | **0 失败** |
+
+后端 `verify_era.py` 另有 **64 项断言 0 失败**。
+
+> `verify-burst.mjs` 是散文式输出（`=> PASS 连拍完成`），只记 1 项；
+> 其余脚本均为 `N passed, M failed` 格式。
+
+## 4. 本轮提交
+
+```
+0fb713d  fix(sticker): 旋转命中、拖动期间不写 store、遮罩 z-顺序
+59d88a6  feat(sticker): 贴纸自由编排，自研 canvas 拖拽，拼图前烧录
+2189d84  fix(doodle): 标注 cover 裁切安全区、修复 ImageBitmap 泄漏与重绘性能
+88c2f52  feat(doodle): 手写涂鸦层，拼图前烧录
+0c59aee  test(era): 补 era 端到端验证, 覆盖漏光真实进成片与回退归零
+41c93a0  fix(era): 移除落盘死代码、参数外置、修正上采样与漏光
+2078b49  feat: era preset (modern | vintage_2000)
+```
+
+未改 `renderMask.ts`（预览=出片契约保持）、未改 `package.json`（零新依赖）、
+未改后端路由契约以外的任何既有行为。
+
+## 5. 已知遗留
+
+- **`era` 不参与取景实时预览**。低分辨率/漏光是 OpenCV 像素操作，
+  `ctx.filter` 表达不了（与 `grain`/`vignette` 同处境）。用户选古早画质后
+  在成片前看不到效果——这是刻意取舍，也意味着它暂时不适合进 store。
+  要进的话得给 era 配一套 CSS 近似的 `css` 字符串。
+- **`era` 不进 AI 提示词**，AI 写真重绘后 era 完全不体现。
+- **`LAYOUT_PAPER` 是前端镜像**。`/api/meta` 的 `LayoutInfo` 只带
+  `cols/rows` 不带 `paper`，而 cell 最终宽高依赖 `paper`。改后端
+  `config.LAYOUTS` 的 `paper` 时**必须同步**这里，否则安全区指错方向
+  （`6inch_4p` 会退化成 2x2 的比例）。`verify-doodle-burn.mjs` 有一条断言
+  拿后端排版清单核对覆盖率，漏同步会直接失败。
+- **`leak_ratio` 0.5 / `leak_r` 40** 是按断言阈值反推的，不是肉眼看图定的。
+  调整只需改 `config.py`，不必动 `filters.py`。
+- **`aiImages` 与 `frames` 的下标同源无断言**。涂鸦/贴纸都按 frames 下标
+  索引，若将来 AI 生成数量可配置（如「选 3 张生成」）会静默错位。
+  目前不可配置，所以不急。
+- **橡皮擦只支持逐笔擦除**，没有独立的撤销栈。`eraser` 作为一笔参与
+  合成（数组顺序即时间线），已能擦掉中间一笔并保留前后两笔，但没有
+  「撤销最后一笔」的 UI。
+- **贴纸无旋转手柄**，只有 `↺↻` 按钮按固定步进旋转。
+- **验证脚本未接入 `npm scripts`**，仍需 `node xxx.mjs` 手动调用
+  （与项目既有的 8 个脚本一致）。
+
