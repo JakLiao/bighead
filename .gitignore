@@ -56,6 +56,10 @@ venv/
 # 蒙版素材校验脚本的产物(contact sheet),preview_samples.py 每次重生成
 scripts/mask_assets/preview.png
 
+# 临时工作目录(手工调试时的草稿/截图)。.tmp/ 不是 .gitignore 的默认规则,
+# 显式列出以免漏掉根目录与任意层级的同名目录。
+.tmp/
+
 # IDE
 .vscode/
 .idea/
