@@ -64,6 +64,9 @@ export function HomePage() {
   // 摄像头检不到帧时的连续重试次数。与已拍张数是两个独立语义。
   // 用 ref: 只在 doSnap 内做判断, 不参与渲染。
   const retryRef = useRef(0);
+  // 重拍时把"下一张插入哪个 idx"传给 doSnap。不需要触发渲染, 只在
+  // doSnap 调用时读一次后清空, 避免泄露到后续拍第 5 张的追加路径。
+  const insertAtRef = useRef<number | null>(null);
 
   // 摄像头拍照能力。通过 ref 显式取用,而不是去读组件的静态属性。
   const camRef = useRef<LiveCameraHandle>(null);
@@ -131,10 +134,14 @@ export function HomePage() {
   function startCapture() {
     if (capturing) return;
     setCapturing(true);
+    // 显式重置 retakeIdx: 新一轮连拍不能继承上一轮遗留的暂停态。
+    // reset() 只清 store 里的连拍产物, HomePage 局部 state 不归它管。
+    setRetakeIdx(null);
     // reset() 会清掉上一轮的 aiImages / layoutUrl / currentJobId —— 之前
     // 这些跨路由永久驻留, 连拍两轮后 DecoratePage 可能显示上一次的 AI 成片。
     reset();
     retryRef.current = 0;
+    insertAtRef.current = null;
     setSnapTick((t) => t + 1);
   }
 
@@ -163,7 +170,18 @@ export function HomePage() {
     // 烧进像素, 之后用户再怎么改开关都不影响这张成片。
     // 包括「重拍本张」 —— 重拍就是再调一次 doSnap, 自然读到当下的 maskPreview,
     // 语义与首拍一致, 不用额外处理。
-    const next = [...frames, { url, burnedIn: maskPreview }];
+    // 重拍时把新片插回原 idx; 普通路径追加到末尾。读完 insertAt 立刻清空,
+    // 避免「retake 路径改完后忘了复位」导致下次拍第 5 张时插到错位置。
+    const insertAt = insertAtRef.current;
+    insertAtRef.current = null;
+    const next =
+      insertAt !== null
+        ? [
+            ...frames.slice(0, insertAt),
+            { url, burnedIn: maskPreview },
+            ...frames.slice(insertAt),
+          ]
+        : [...frames, { url, burnedIn: maskPreview }];
     setFrames(next);
     if (next.length >= PHOTO_COUNT) {
       // 第 4 张直通 decorate —— RetakeBar 只在 idx < PHOTO_COUNT - 1 时出现。
@@ -180,13 +198,12 @@ export function HomePage() {
   function handleRetakePick(mode: "retake" | "continue") {
     if (retakeIdx === null) return;
     if (mode === "retake") {
-      // 丢掉当前 frames[retakeIdx], 重拍这一张。
-      // setSnapTick++ 触发新一轮 3-2-1, doSnap 再拍一张插回 retakeIdx。
-      const cur = frames[retakeIdx];
+      // 丢掉 retakeIdx 位置的照片, 重拍这一张。
+      // insertAtRef 告诉 doSnap 把新片插回原 idx(而不是追加到末尾);
+      // setSnapTick++ 触发新一轮 3-2-1 倒计时。丢弃的 url 是 dataURL,
+      // 由浏览器在卸载时自动释放 —— 不需要也不应该手动 revoke。
       setFrames(frames.filter((_, i) => i !== retakeIdx));
-      // 上一张被丢弃后, 它的 url 是 dataURL —— 浏览器会在页面卸载/手动
-      // revoke 时释放。这里只置空, 不强制 revoke(blob 不是 blob:, 没意义)。
-      void cur; // 仅为了让 ESLint 不抱怨未使用变量
+      insertAtRef.current = retakeIdx;
     }
     // continue: frames 保持不变, 倒计时启动 → doSnap 追加一张。
     setRetakeIdx(null);
@@ -222,7 +239,7 @@ export function HomePage() {
         <CountdownOverlay tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
         <PoseHint
-          pose={POSES[frames.length % POSES.length]}
+          pose={POSES[(retakeIdx ?? frames.length) % POSES.length]}
           visible={showPose && capturing}
         />
         {retakeIdx !== null && (
