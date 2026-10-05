@@ -18,8 +18,11 @@ import {
   DOODLE_DEFAULT_COLOR,
   DOODLE_DEFAULT_TOOL,
   DOODLE_DEFAULT_WIDTH,
+  DOODLE_FALLBACK_LAYOUTS,
   DOODLE_TOOLS,
   DOODLE_WIDTHS,
+  doodleSafeArea,
+  type DoodleLayoutGeom,
   type DoodleStroke,
   type DoodleTool,
 } from "../components/doodles/doodleTypes";
@@ -69,32 +72,40 @@ function dataUrlToBlob(url: string): Promise<Blob> {
 async function burnDoodles(photoBlob: Blob, strokes: DoodleStroke[]): Promise<Blob> {
   if (strokes.length === 0) return photoBlob;
   const bitmap = await createImageBitmap(photoBlob);
-  const w = bitmap.width;
-  const h = bitmap.height;
+  // ImageBitmap 是**显式**管理的资源: 不调 close() 不会进 GC 的自动回收路径,
+  // 解码后的像素(1280x960x4 ≈ 4.7MB/张)会一直挂在 GPU/内存里。
+  // 原来 close() 散落在函数体的多个分支上, 中间任何一次抛错(paintDoodleStrokes
+  // 里的 canvas 调用、drawImage)都会跳过它 —— 一次失败就泄漏一张 4.7MB,
+  // 连拍重来几轮就足以让移动端标签页被系统杀掉。try/finally 让"必须归还"
+  // 变成语言级保证, 而不是靠每条分支都记得写一遍。
+  try {
+    const w = bitmap.width;
+    const h = bitmap.height;
 
-  const layer = document.createElement("canvas");
-  layer.width = w;
-  layer.height = h;
-  paintDoodleStrokes(layer.getContext("2d"), strokes);
+    const layer = document.createElement("canvas");
+    layer.width = w;
+    layer.height = h;
+    paintDoodleStrokes(layer.getContext("2d"), strokes);
 
-  const out = document.createElement("canvas");
-  out.width = w;
-  out.height = h;
-  const ctx = out.getContext("2d");
-  if (!ctx) {
+    const out = document.createElement("canvas");
+    out.width = w;
+    out.height = h;
+    const ctx = out.getContext("2d");
+    if (!ctx) return photoBlob;
+    // 像素在此刻已拷进 out 画布, 之后 bitmap 与输出不再有引用关系,
+    // 所以 close 放在 toBlob 之前是安全的(不必等编码结束)。
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    ctx.drawImage(layer, 0, 0);
+
+    // toBlob 在 canvas tainted 或尺寸超限时给 null, 回落原图而不是抛错 ——
+    // 烧录失败不该让用户丢掉整轮照片。
+    const burned = await new Promise<Blob | null>((resolve) =>
+      out.toBlob(resolve, "image/jpeg", 0.92),
+    );
+    return burned ?? photoBlob;
+  } finally {
     bitmap.close();
-    return photoBlob;
   }
-  ctx.drawImage(bitmap, 0, 0, w, h);
-  ctx.drawImage(layer, 0, 0);
-  bitmap.close();
-
-  // toBlob 在 canvas  tainted 或尺寸超限时给 null, 回落原图而不是抛错 ——
-  // 烧录失败不该让用户丢掉整轮照片。
-  const burned = await new Promise<Blob | null>((resolve) =>
-    out.toBlob(resolve, "image/jpeg", 0.92),
-  );
-  return burned ?? photoBlob;
 }
 
 interface ToolbarProps {
@@ -175,6 +186,26 @@ function DoodleToolbar({ color, tool, width, onColor, onTool, onWidth }: Toolbar
   );
 }
 
+/**
+ * 把安全区渲染成一句**如实**的提示。
+ *
+ * 只列出真正会被裁掉的边: 6inch_4p 不裁左右, 文案就不该提"两侧"。
+ * 措辞用"压暗区…不会出现在成片里"而不是"所有笔迹都会烧进最终图" ——
+ * 后者是旧文案且是错的: 落在裁切窗口外的笔迹会被 _smart_crop 静默切掉。
+ * 百分比带"约"字: 安全区按几何中心算, 检到人脸时后端 focus 会平移窗口
+ * (见 doodleSafeArea 的局限说明), 精确到个位会显得比实际更可信。
+ */
+function safeText(s: { top: number; right: number; bottom: number; left: number }): string {
+  const pct = (v: number) => Math.round(v * 100);
+  const parts: string[] = [];
+  if (s.left > 0) parts.push(`左 ${pct(s.left)}%`);
+  if (s.right > 0) parts.push(`右 ${pct(s.right)}%`);
+  if (s.top > 0) parts.push(`上 ${pct(s.top)}%`);
+  if (s.bottom > 0) parts.push(`下 ${pct(s.bottom)}%`);
+  if (parts.length === 0) return "当前排版不裁切画面, 笔迹都会保留";
+  return `压暗区(${parts.join(" / ")})不会被保留`;
+}
+
 export function DecoratePage() {
   const frames = useStore((s) => s.frames);
   const filter = useStore((s) => s.filter);
@@ -246,6 +277,24 @@ export function DecoratePage() {
   // 相框已在取景阶段烧进照片。本页的"相框"选择改为「额外再套一层」,
   // 默认 none,即保持所见即所得的结果不变。想换框请回取景页重拍。
   const [frameOverride, setFrameOverride] = useState<string | null>(null);
+
+  /**
+   * 当前排版下会被后端 cover 裁掉的比例(四周各多少)。
+   *
+   * 刻意用 useMemo 跟着 `layout` 走: 排版是用户可切的, 而被裁的方向与宽度
+   * 都随 cell 比例变(2x2 裁左右 21.7%, 6inch_4p 裁上下 2.8%/18.8%)。
+   * 算一次存成常量的话, 用户切排版后提示就指错了地方 —— 那比没有提示更糟。
+   *
+   * meta.layouts 只带 cols/rows(见 backend/routes/health.py), paper 由
+   * doodleTypes 内的镜像表补; meta 还没到时用 DOODLE_FALLBACK_LAYOUTS 兜底,
+   * 保证首屏进模态就有提示, 而不是等 meta 到达后提示才突然出现。
+   */
+  const safeArea = useMemo(() => {
+    const list: DoodleLayoutGeom[] =
+      meta.layouts.length > 0 ? meta.layouts : DOODLE_FALLBACK_LAYOUTS;
+    const hit = list.find((l) => l.key === layout) ?? list[0] ?? DOODLE_FALLBACK_LAYOUTS[0];
+    return doodleSafeArea(hit);
+  }, [layout, meta.layouts]);
   // AI 生成完成后要拼的图。AI 分支拿到的 URL 是 /outputs 下的服务端路径,
   // 拼图接口要的是二进制, 所以在内存里按需抓成 Blob。
   // 抓完直接喂给 makeLayout, 不需要跨渲染保留 —— 用局部变量即可。
@@ -417,9 +466,33 @@ export function DecoratePage() {
       // 这样笔迹会跟着整张图一起被处理(颗粒、漏光、暗角一视同仁), 也就是
       // 用户"在成片上手写"的真实预期; 反过来先烧滤镜再叠笔迹, 笔迹会
       // 浮在一层被处理过的画面上, 与编辑模态里看到的(原图上的笔迹)对不上。
-      const stamped = await Promise.all(
-        blobs.map((b, i) => (doodles[i]?.length ? burnDoodles(b, doodles[i]) : b)),
-      );
+      //
+      // 串行而非 Promise.all: 每张 burnDoodles 同时持有 1 个 ImageBitmap
+      // + 3 张全尺寸 canvas(1280x960x4 ≈ 4.7MB/张)。四张并发就是峰值
+      // ~75MB 的瞬时分配, 在移动端 Safari 上足以触发标签页被杀;
+      // 串行把这个峰值压到单张的量级。顺带能把进度真实报出来 ——
+      // Promise.all 期间进度条只能干瞪眼, 用户点完按钮后面对一个
+      // 不动的界面, 只能靠"是不是卡了"的猜测来决定要不要等。
+      const stamped = [...blobs];
+      // 只烧"这一帧真有笔迹"的下标。必须显式列出而不能对 doodles 做 map:
+      // doodles 是 DoodlesByIndex = Record<number, DoodleStroke[]>(见
+      // doodleTypes), 是稀疏字典而非数组, 对它 .map 会直接抛
+      // "Property 'map' does not exist"。同时按 blobs 的长度收敛 ——
+      // 用户可能给第 5 张画了笔而当前只有 4 帧, 多出来的下标会让
+      // stamped 长度超过 blobs, 后面 applyFilter 就会拿到 undefined。
+      const marked: number[] = [];
+      for (let i = 0; i < blobs.length; i++) {
+        if (doodles[i]?.length) marked.push(i);
+      }
+      for (let n = 0; n < marked.length; n++) {
+        const i = marked[n];
+        setProgress({
+          current: n + 1,
+          total: marked.length,
+          msg: `正在烧录涂鸦 ${n + 1}/${marked.length}`,
+        });
+        stamped[i] = await burnDoodles(blobs[i], doodles[i]);
+      }
       const needFilter = frames.some((f) => !f.burnedIn);
       // era 必须与 preset 走同一趟后端: burnedIn 只保证「滤镜」已烧, 不含年代。
       // 所以 needFilter 为假但选了古早画质时, 仍要发一次请求(preset 传 none,
@@ -637,7 +710,9 @@ export function DecoratePage() {
             {busy
               ? aiEnabled
                 ? `AI 生成中 ${progress.current}/${progress.total}`
-                : "生成中..."
+                : progress.total > 0
+                  ? `生成中 ${progress.current}/${progress.total}`
+                  : "生成中..."
               : aiEnabled
                 ? "开始 AI 生成 + 拼图"
                 : "生成拼图"}
@@ -649,7 +724,14 @@ export function DecoratePage() {
             </div>
           )}
 
-          {busy && aiEnabled && progress.total > 0 && (
+          {/*
+            进度条不按 aiEnabled 分流: 涂鸦烧录是串行的(见 doLayout), 每张
+            都会 setProgress 一次。此前这里要求 aiEnabled 才渲染, 而普通
+            "生成拼图"(aiEnabled=false, 默认路径)恰好把进度条藏了 —— 串行
+            带来的实时反馈在主路径上完全看不到, 等于白做。total>0 才渲染,
+            避免没有进度时画出空条。
+          */}
+          {busy && progress.total > 0 && (
             <div className="bg-cream rounded-lg p-3 text-xs">
               <div className="h-2 bg-pink rounded-full overflow-hidden">
                 <div
@@ -707,12 +789,16 @@ export function DecoratePage() {
                     onChange={(next) => setDoodles(editingIdx, next)}
                     width={DOODLE_EDIT_W}
                     height={DOODLE_EDIT_H}
+                    safe={safeArea}
                   />
                 </div>
 
                 <div className="mt-3 text-[10px] text-brown/60">
                   在照片上按住拖动即可落笔 · 橡皮可擦掉已画的笔迹 ·
-                  所有笔迹在点「生成拼图」时烧进最终图
+                  笔迹在点「生成拼图」时烧进照片 ·{" "}
+                  <span className="text-brick" data-doodle-safe-text="">
+                    {safeText(safeArea)}
+                  </span>
                   {doodles[editingIdx]?.length
                     ? ` · 当前这张 ${doodles[editingIdx].length} 笔`
                     : ""}
@@ -724,11 +810,20 @@ export function DecoratePage() {
             {displayImages.slice(0, 8).map((src, i) => (
               <button
                 type="button"
-                key={i}
+                // key 掺入 src: 连拍换一轮后 frames 会被整体替换, 只用下标做
+                // key 会让 React 认为"还是同一张图", 于是复用旧节点 —— 上一轮
+                // 的 <img> 与「N 笔」角标会被原地改成新内容。掺入 src 后
+                // 源变了就是新节点, 角标不会残留。
+                key={`${i}:${src}`}
                 data-doodle-thumb={i}
                 onClick={() => setEditingIdx(i)}
                 title="点击编辑这张的涂鸦"
-                className="relative aspect-[3/4] w-full overflow-hidden rounded-lg border-2 border-pink bg-white text-left transition hover:border-brick"
+                // 比例必须与编辑模态的画布一致(4:3 = CAPTURE_ASPECT):
+                // 缩略图用 object-cover, 若容器是 3/4 则显示的是**被裁过的**
+                // 画面, 与进模态后看到的整张照片对不上, 用户会以为笔迹位置
+                // 整体偏移。object-cover 在同比例下等价于完整显示。
+                className="relative w-full overflow-hidden rounded-lg border-2 border-pink bg-white text-left transition hover:border-brick"
+                style={{ aspectRatio: `${CAPTURE_ASPECT.w} / ${CAPTURE_ASPECT.h}` }}
               >
                 <img
                   src={src}

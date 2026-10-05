@@ -28,6 +28,10 @@
  * 本脚本最容易踩空的地方: 画在边上时笔迹确实烧进了照片, 但拼图里看不到,
  * 断言会以"功能没做"的面貌失败。脚本里显式断言了每笔的 x 范围。
  *
+ * 第 6 节反过来专门画在 x=0.02(保留窗口之外), 断言成片**没有**蓝色 ——
+ * 把"边缘笔迹会被静默裁掉"这个事实钉成回归, 同时验证 UI 的安全区提示
+ * 随排版切换而改变(2x2 裁左右 21.7%, 6inch_4p 裁上下 2.8%/18.8%)。
+ *
  * 画三笔:
  *   A 蓝色马克笔, 相对 y=0.50 横贯画面 —— 成片里**必须**出现该蓝
  *   B 蓝色马克笔, 相对 y=0.75 短横 —— 用来验证橡皮真的能擦
@@ -394,7 +398,198 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-console.log("\n--- 6. reset 清掉涂鸦 ---");
+console.log("\n--- 6. 回归: 故意画到 x=0.02 的边缘笔迹, 成片该区域必须没有蓝色 ---");
+// 这一节把 H1 的缺陷钉成回归。
+//
+// 缺陷本身: 后端 _smart_crop 是 cover 裁切, 1280x960 塞进 615x815(0.755)
+// 会裁掉左右各 21.7%(保留 x∈[0.217,0.784])。画在 x=0.02 的笔迹**确实
+// 烧进了照片**, 但成片上凭空消失, 而旧文案写着「所有笔迹都会烧进最终图」。
+//
+// 断言为什么是"没有蓝色"而不是"有蓝色": 这不是在测功能能不能用, 而是在
+// 测**裁切行为是否与 UI 提示一致**。x=0.02 落在保留窗口之外, 所以正确结果
+// 就是成片边缘看不到那笔蓝。若哪天有人把 _smart_crop 改成 contain/不裁切,
+// 这条断言会失败 —— 那正是我们要的: 几何一变, 提示与成片的对应关系必须
+// 重新验证, 而不是悄悄放过。
+//
+// 取样窗口用照片坐标反推: x∈[0, 0.217] 的照片区域, 在拼图里落在
+// cell 左侧的**外面**(被裁掉了), 因此预期整条左侧带都是纯灰。
+// 拼图 cell(0,0) 起点 (30,30), cell 宽 615, 照片保留窗口 0.217~0.784。
+const BAND_EDGE_L = [0.0, 0.045, 0.20, 0.30];
+/** 右侧对称带。cell 右边界 = 30+615=645 -> 645/1320 = 0.4886。 */
+const BAND_EDGE_R = [0.455, 0.5, 0.20, 0.30];
+
+const edgeDrawn = await page.evaluate(() => {
+  window.__store.getState().reset();
+  return true;
+});
+check("已 reset 准备边缘用例", edgeDrawn === true);
+
+const reInjected = await page.evaluate((gray) => {
+  const frames = Array.from({ length: 4 }, () => ({
+    url: window.__mkGray(1280, 960, gray),
+    burnedIn: true,
+  }));
+  window.__store.getState().setFrames(frames);
+  return window.__store.getState().frames.length;
+}, GRAY);
+check("重新注入 4 张灰帧", reInjected === 4, `${reInjected} 张`);
+
+await page.locator("[data-doodle-thumb='0']").click();
+await page.locator("[data-doodle-canvas]").waitFor({ state: "visible", timeout: 10000 });
+const modalScope2 = page.locator("[data-doodle-scope='modal']");
+await modalScope2.locator(`[data-doodle-color='${BLUE}']`).click();
+// 必须显式选回马克笔: 工具状态活在 DecoratePage 里并跨模态保留, 第 3 节
+// 最后画的是橡皮(C 笔), 不点这一下就仍是 eraser, 画出来的是擦除笔迹。
+await modalScope2.locator("[data-doodle-tool='marker']").click();
+await modalScope2.locator("[data-doodle-width='14']").click();
+
+const box2 = await page.locator("[data-doodle-canvas]").boundingBox();
+const at2 = (rx, ry) => ({ x: box2.x + rx * box2.width, y: box2.y + ry * box2.height });
+/** 沿相对坐标画一笔(pointerdown → 多次 move → pointerup)。 */
+async function stroke2(fromX, y, toX) {
+  const p0 = at2(fromX, y);
+  await page.mouse.move(p0.x, p0.y);
+  await page.mouse.down();
+  const steps = 8;
+  for (let i = 1; i <= steps; i++) {
+    const p = at2(fromX + ((toX - fromX) * i) / steps, y);
+    await page.mouse.move(p.x, p.y);
+  }
+  await page.mouse.up();
+  await page.waitForTimeout(60);
+}
+
+// 关键: 起点 x=0.02, 远在 0.217 之外, 但仍在照片范围内(画得出来)。
+await stroke2(0.02, 0.5, 0.06);
+
+const edgeStroke = await page.evaluate(() => {
+  const d = window.__store.getState().doodles[0] ?? [];
+  const s = d[0];
+  return {
+    n: d.length,
+    tool: s?.tool,
+    color: s?.color,
+    minX: s ? Math.min(...s.points.map((p) => p.x)) : -1,
+    maxX: s ? Math.max(...s.points.map((p) => p.x)) : -1,
+  };
+});
+check("边缘笔迹已进 store", edgeStroke.n === 1, `${edgeStroke.n} 笔`);
+check("边缘笔迹是蓝色马克笔", edgeStroke.color === BLUE && edgeStroke.tool === "marker",
+  `${edgeStroke.color}/${edgeStroke.tool}`);
+check(
+  "边缘笔迹 x 确实落在保留窗口 0.217 之外(前提成立, 否则本用例无意义)",
+  edgeStroke.minX < 0.217,
+  `x∈[${edgeStroke.minX.toFixed(3)}, ${edgeStroke.maxX.toFixed(3)}]`,
+);
+
+// 安全区可视化: 2x2 排版下必须存在左右两条压暗, 且宽度接近 21.7%。
+//
+// 量取要分清方向: 左/右是竖条, 量 width; 上/下是横条, 量 height。
+// 早期版本一律取 width, 于是上/下拿到的是整条画布宽(640), 除以画布高
+// 480 得到 133% 这种明显荒谬的数 —— 断言虽然红了, 但红的原因是量错了,
+// 不是被测行为有问题, 这种测试会浪费排查时间。
+const safe2x2 = await page.evaluate(() => {
+  const box = (s) => {
+    const el = document.querySelector(`[data-doodle-safe='${s}']`);
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    return s === "top" || s === "bottom" ? r.height : r.width;
+  };
+  const c = document.querySelector("[data-doodle-canvas]")?.getBoundingClientRect();
+  return {
+    left: box("left"), right: box("right"), top: box("top"), bottom: box("bottom"),
+    cw: c?.width ?? 0, ch: c?.height ?? 0,
+  };
+});
+check("2x2 排版下存在左右安全区遮罩", safe2x2.left > 0 && safe2x2.right > 0,
+  `L=${safe2x2.left.toFixed(1)} R=${safe2x2.right.toFixed(1)}`);
+check(
+  "左右安全区宽度约为画布的 21.7%(与 _smart_crop 实算一致)",
+  Math.abs(safe2x2.left / safe2x2.cw - 0.217) < 0.02,
+  `${(safe2x2.left / safe2x2.cw * 100).toFixed(1)}%`,
+);
+check("2x2 不裁上下, 故无上下遮罩", safe2x2.top === 0 && safe2x2.bottom === 0,
+  `T=${safe2x2.top} B=${safe2x2.bottom}`);
+
+// 文案必须如实说明, 不能再出现"所有笔迹都会烧进最终图"。
+const copy2x2 = await page.locator("[data-doodle-safe-text]").textContent();
+check("文案不再声称所有笔迹都会保留", !(copy2x2 ?? "").includes("所有笔迹"), copy2x2 ?? "(无)");
+check("文案点明压暗区不会被保留", (copy2x2 ?? "").includes("不会被保留"), copy2x2 ?? "(无)");
+
+// 换排版: 6inch_4p 的 cell 比照片宽, 裁的是**上下**, 左右不裁。
+// 这一条断言是"安全区按排版动态算"的核心证据 —— 写死 0.217 的实现
+// 在这个排版下会同时指错方向(遮了不裁的左右, 没遮真正被裁的上下)。
+await page.evaluate(() => window.__store.getState().setLayout("6inch_4p"));
+await page.waitForTimeout(300);
+const safe6 = await page.evaluate(() => {
+  const box = (s) => {
+    const el = document.querySelector(`[data-doodle-safe='${s}']`);
+    if (!el) return 0;
+    const r = el.getBoundingClientRect();
+    return s === "top" || s === "bottom" ? r.height : r.width;
+  };
+  const c = document.querySelector("[data-doodle-canvas]")?.getBoundingClientRect();
+  return {
+    left: box("left"), right: box("right"), top: box("top"), bottom: box("bottom"),
+    cw: c?.width ?? 0, ch: c?.height ?? 0,
+  };
+});
+check("6inch_4p 下左右不再有遮罩(该排版不裁左右)", safe6.left === 0 && safe6.right === 0,
+  `L=${safe6.left} R=${safe6.right}`);
+check("6inch_4p 下出现上下遮罩(该排版裁上下)", safe6.top > 0 && safe6.bottom > 0,
+  `T=${safe6.top.toFixed(1)} B=${safe6.bottom.toFixed(1)}`);
+check(
+  "上遮罩约为画布高的 2.8%, 下遮罩约为 18.8%",
+  Math.abs(safe6.top / safe6.ch - 0.028) < 0.02 && Math.abs(safe6.bottom / safe6.ch - 0.188) < 0.02,
+  `T=${(safe6.top / safe6.ch * 100).toFixed(1)}% B=${(safe6.bottom / safe6.ch * 100).toFixed(1)}%`,
+);
+const copy6 = await page.locator("[data-doodle-safe-text]").textContent();
+check("6inch_4p 文案不再提两侧", !(copy6 ?? "").includes("两侧"), copy6 ?? "(无)");
+
+// 切回 2x2, 生成拼图, 断言边缘区域没有蓝色。
+await page.evaluate(() => window.__store.getState().setLayout("2x2"));
+await page.waitForTimeout(200);
+await page.locator("[data-doodle-modal] button", { hasText: "完成" }).click();
+check("「完成」关闭模态", (await page.locator("[data-doodle-modal]").count()) === 0);
+
+const baseUrl2 = await page.evaluate(() => window.__store.getState().layoutUrl);
+await genBtn.click();
+await page.waitForFunction(
+  (p) => {
+    const u = window.__store?.getState().layoutUrl;
+    return typeof u === "string" && u.length > 0 && u !== p;
+  },
+  baseUrl2,
+  { timeout: 120000 },
+);
+const edgeUrl = await page.evaluate(() => window.__store.getState().layoutUrl);
+check("边缘用例生成了新拼图", edgeUrl !== baseUrl2);
+const edgeShot = await page.evaluate(
+  ([u, a, b]) => window.__scan(u, a, b),
+  [edgeUrl, BAND_EDGE_L, BAND_EDGE_R],
+);
+console.log(
+  `         边缘拼图 ${edgeShot.w}x${edgeShot.h}  蓝色像素 ${edgeShot.total}` +
+    `  左带(${edgeShot.aN}px) 右带(${edgeShot.bN}px)`,
+);
+check(
+  "x=0.02 的边缘笔迹未出现在成片左侧(被 cover 裁掉, 与提示一致)",
+  edgeShot.aN === 0,
+  `左带残留 ${edgeShot.aN}px`,
+);
+check(
+  "x=0.02 的边缘笔迹未出现在成片右侧",
+  edgeShot.bN === 0,
+  `右带残留 ${edgeShot.bN}px`,
+);
+check(
+  "整张成片没有任何涂鸦蓝色(该笔迹整体被裁掉)",
+  edgeShot.total === 0,
+  `total=${edgeShot.total}`,
+);
+
+// ---------------------------------------------------------------------------
+console.log("\n--- 7. reset 清掉涂鸦 ---");
 const afterReset = await page.evaluate(() => {
   window.__store.getState().reset();
   const s = window.__store.getState();
@@ -403,7 +598,7 @@ const afterReset = await page.evaluate(() => {
 check("reset 后 doodles 被清空", afterReset.doodles === 0, `${afterReset.doodles} 项`);
 check("reset 后 frames 被清空", afterReset.frames === 0, `${afterReset.frames} 张`);
 
-console.log("\n--- 7. 无运行时错误 ---");
+console.log("\n--- 8. 无运行时错误 ---");
 check("无 pageerror", errors.length === 0, errors.slice(0, 2).join(" | "));
 
 await browser.close();
