@@ -52,6 +52,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# 贴纸册元数据 sidecar。下划线开头是有意为之:
+# gallery.py 的目录扫描以 _ 或 . 开头的名字作为内部目录/文件跳过,
+# 这样 _album.json 既能被 ALBUM 路径找到, 又不会被列进 /api/gallery 的 items。
+ALBUM_FILENAME = "_album.json"
+ALBUM_MAX_TITLE = 64      # 标题字节数上限
+ALBUM_MAX_NOTE = 280      # 备注字节数上限
+ALBUM_MAX_TAG = 16        # 单标签字节数上限
+ALBUM_MAX_TAGS = 8        # 标签数量上限
+
 # 复用 webui 的模型仓库(用户指定)
 MODEL_BASE = Path(r"E:\Code\stable-diffusion-webui\models")
 
