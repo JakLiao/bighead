@@ -6,8 +6,8 @@
  *
  * 关键约束: 不能进入 React 渲染分支去读 poseIndex —— 那样会在每次
  * 拍照后强制重渲染 LiveCamera(父组件)与取景层, 引发「视频流闪烁」。
- * 这里用 props 传 pose 触发 useEffect 重置 key, 让 CSS 动画从头
- * 播放; 文本节点直接显示在当前值上。
+ * 这里用 key={pose} 让 React 在 pose 变化时 remount 该节点,
+ * CSS 动画自然从头播放; 文本节点直接显示在当前值上。
  */
 interface Props {
   /** 当前应当显示的 pose 词, 由父组件按 frames.length 推算 */
