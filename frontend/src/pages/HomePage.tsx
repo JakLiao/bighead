@@ -9,10 +9,13 @@ import { FrameStrip } from "../components/FrameStrip";
 import { MaskStrip } from "../components/MaskStrip";
 import { MaskGallery } from "../components/MaskGallery";
 import { getImageMasks, loadMaskManifest } from "../components/masks/maskLibrary";
+import { PoseHint } from "../components/retake/PoseHint";
+import { RetakeBar } from "../components/retake/RetakeBar";
 import { fetchMeta } from "../api";
 import type { FilterInfo, FrameInfo } from "../types";
 
 const PHOTO_COUNT = 4;
+const POSES = ["嘟嘴", "比心", "看镜头", "笑僵"] as const;
 
 /**
  * 稳定引用占位。LiveCamera 包了 memo, 若这里传内联箭头函数, 每次渲染都是
@@ -34,6 +37,9 @@ export function HomePage() {
   const setMaskPreview = useStore((s) => s.setMaskPreview);
   const showGuides = useStore((s) => s.showGuides);
   const setShowGuides = useStore((s) => s.setShowGuides);
+  const showPose = useStore((s) => s.showPose);
+  const setShowPose = useStore((s) => s.setShowPose);
+  const [retakeIdx, setRetakeIdx] = useState<number | null>(null);
   const setFrameMeta = useStore((s) => s.setFrameMeta);
   const setFilterMeta = useStore((s) => s.setFilterMeta);
   const maskKey = useStore((s) => s.maskKey);
@@ -155,14 +161,36 @@ export function HomePage() {
     timers.current.push(window.setTimeout(() => setFlash(false), 250));
     // burnedIn 取此刻的 maskPreview 快照: snap() 里已按这个值把滤镜
     // 烧进像素, 之后用户再怎么改开关都不影响这张成片。
+    // 包括「重拍本张」 —— 重拍就是再调一次 doSnap, 自然读到当下的 maskPreview,
+    // 语义与首拍一致, 不用额外处理。
     const next = [...frames, { url, burnedIn: maskPreview }];
     setFrames(next);
     if (next.length >= PHOTO_COUNT) {
+      // 第 4 张直通 decorate —— RetakeBar 只在 idx < PHOTO_COUNT - 1 时出现。
       setCapturing(false);
+      setRetakeIdx(null);
       timers.current.push(window.setTimeout(() => nav("/decorate"), 400));
     } else {
-      setSnapTick((t) => t + 1);
+      // 前 3 张拍完进入暂停: 用户在 RetakeBar 上点「重拍本张」或「继续」。
+      // 不再像旧版那样 setSnapTick++ 自动进下一张。
+      setRetakeIdx(next.length - 1);
     }
+  }
+
+  function handleRetakePick(mode: "retake" | "continue") {
+    if (retakeIdx === null) return;
+    if (mode === "retake") {
+      // 丢掉当前 frames[retakeIdx], 重拍这一张。
+      // setSnapTick++ 触发新一轮 3-2-1, doSnap 再拍一张插回 retakeIdx。
+      const cur = frames[retakeIdx];
+      setFrames(frames.filter((_, i) => i !== retakeIdx));
+      // 上一张被丢弃后, 它的 url 是 dataURL —— 浏览器会在页面卸载/手动
+      // revoke 时释放。这里只置空, 不强制 revoke(blob 不是 blob:, 没意义)。
+      void cur; // 仅为了让 ESLint 不抱怨未使用变量
+    }
+    // continue: frames 保持不变, 倒计时启动 → doSnap 追加一张。
+    setRetakeIdx(null);
+    setSnapTick((t) => t + 1);
   }
 
   return (
@@ -193,6 +221,18 @@ export function HomePage() {
         />
         <CountdownOverlay tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
+        <PoseHint
+          pose={POSES[frames.length % POSES.length]}
+          visible={showPose && capturing}
+        />
+        {retakeIdx !== null && (
+          <RetakeBar
+            previewUrl={frames[retakeIdx]?.url ?? null}
+            photoNumber={retakeIdx + 1}
+            total={PHOTO_COUNT}
+            onPick={handleRetakePick}
+          />
+        )}
       </div>
 
       {/* 蒙版开关:默认开启,拍前即可见相框/色调/构图引导 */}
@@ -214,6 +254,15 @@ export function HomePage() {
             className="w-4 h-4 accent-brick"
           />
           构图引导线
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showPose}
+            onChange={(e) => setShowPose(e.target.checked)}
+            className="w-4 h-4 accent-brick"
+          />
+          pose 文字提示
         </label>
         <span className="text-brown/50">
           {maskPreview ? "所见即所得：拍下即成片" : "已关闭：拍摄原始画面"}

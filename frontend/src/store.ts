@@ -53,6 +53,9 @@ export interface CaptureState {
    * 靠 useEffect 手动清理, 漏一次就会出现"上一轮的笔迹烧进这一轮的照片"。
    */
   doodles: DoodlesByIndex;
+  /** pose 浮层是否可见。默认开, 是 UI 偏好, reset 不清。 */
+  showPose: boolean;
+  setShowPose: (v: boolean) => void;
   /**
    * 每张照片**额外**摆放的贴纸, key 是 frames 数组下标。
    *
@@ -108,6 +111,7 @@ export const useStore = create<CaptureState>((set) => ({
   filterMeta: {},
   maskPreview: true,
   showGuides: true,
+  showPose: true,
   maskKey: "heart",
   maskGalleryOpen: false,
   doodles: {},
@@ -125,6 +129,7 @@ export const useStore = create<CaptureState>((set) => ({
   setFilterMeta: (m) => set({ filterMeta: toMap(m) }),
   setMaskPreview: (v) => set({ maskPreview: v }),
   setShowGuides: (v) => set({ showGuides: v }),
+  setShowPose: (v) => set({ showPose: v }),
   setMaskKey: (v) => set({ maskKey: v }),
   setMaskGalleryOpen: (v) => set({ maskGalleryOpen: v }),
   setDoodles: (idx, strokes) => set((s) => ({ doodles: { ...s.doodles, [idx]: strokes } })),
