@@ -51,3 +51,19 @@ select:focus-visible {
 .countdown-num {
   animation: countdown-pop 900ms ease-out;
 }
+
+/* pose 提示浮层 */
+@keyframes pose-in {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -8px) scale(0.9);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+.animate-pose-in {
+  animation: pose-in 320ms ease-out both;
+}
