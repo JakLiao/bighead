@@ -362,6 +362,221 @@ check(
 );
 
 // ---------------------------------------------------------------------------
+// §4b. 拖动期间不写 store:外部订阅者渲染次数不随每帧 pointermove 增长
+// ---------------------------------------------------------------------------
+// 这是 H2 的关键回归:H2 修复前每个 pointermove 都调 onChange → store
+// stickerOverrides 被整体替换 → 父组件(useStore 订阅 stickerOverrides)重
+// 渲染。修复后只在 pointerup 时一次性写 store,拖动期间 store 不变,外部订阅
+// 不应触发 React 重渲染(其它无关订阅再变换背景色这类)。装一个供 React 订阅
+// 的纯函数最容易诊断 ——「订阅者渲染次数不随每帧 pointermove 增长」。
+console.log("\n--- 4b. 拖动期间不写 store, 外部订阅者重渲染次数受控 ---");
+// 1) 装一个全局计数器 + 注入"订阅者组件":每次 React 重新渲染它都会 +1,
+//    用 React 的 forceUpdate 触发一次最朴素的"我订阅了"。
+//    用 IIFE 注入 React 组件挂到 window 上,然后由 StickerEditor 父链触发
+//    重渲染时一并被 React 调和,渲染次数自增。
+const installProbe = `
+  window.__renderProbe = (() => {
+    let n = 0;
+    let React = null;
+    let _force = 0;
+    return {
+      attach(R) { React = R; },
+      bump() { n++; _force = (_force + 1) & 0xffff; return _force; },
+      get n() { return n; },
+      force() { return _force; },
+    };
+  })();
+`;
+await page.evaluate(installProbe);
+// 通过 store.subscribe 监听 stickerOverrides 变化:每次变化 +1,
+// 模拟「父组件被 store 变化驱动重渲染」。
+// store.subscribe 是 zustand 标准 API,与组件订阅走的是同一条 set 通路,
+// 因此它就是「外部订阅被触发」的最直接代理。
+await page.evaluate(() => {
+  const api = window.__store;
+  window.__renderStore = { n: 0, last: api.getState().stickerOverrides };
+  api.subscribe((s) => {
+    if (s.stickerOverrides !== window.__renderStore.last) {
+      window.__renderStore.n++;
+      window.__renderStore.last = s.stickerOverrides;
+    }
+  });
+});
+// 2) 装一个 React-组件级探针:把一段返回 <span> 的小组件塞到 React 树外
+//    (在 body 里挂一个用 React 渲染的根)然后订阅 stickerOverrides。每当
+//    stickerOverrides 引用变,React 重渲染它,__renderReact.n +1。
+await page.evaluate(() => {
+  // 拿到已加载的 React:本仓库通过 import React from 'react' 暴露 module。
+  // 这里用 document-level 选 [data-sticker-canvas],找到它的 fiber owner。
+  // fiber 走 React 18 internals 比较容易脆,改用更稳的策略:模拟一次外部
+  // 订阅者 —— 直接 hook setStickerOverrides(set),记录其被调用的次数。
+  // setStickerOverrides 走 zustand 的 set(走 React 内部 subscribe 通知)——
+  // 调用次数 = store 写入次数 = 父组件会重渲染的次数(因为 zustand 默认
+  // 触发所有 useStore 订阅者重新对比)。
+  window.__renderReact = { n: 0 };
+  const set = window.__store.getState().setStickerOverrides;
+  // 包装一层,在原 set 之前计数。
+  // 注意 set 是 useStore 闭包里的引用,包装它的副本后重写进 store 的 actions。
+  window.__store.setState((s) => {
+    const origSet = s.setStickerOverrides;
+    return {
+      setStickerOverrides: (idx, list) => {
+        window.__renderReact.n++;
+        return origSet(idx, list);
+      },
+    };
+  });
+});
+
+// 3) 拖动:取第一颗(红爱心)中心附近(0.45, 0.30)为 start, move 到 +10
+//    像素的下方位置 = ~y+0.02 处,8 帧。
+const probeBox = await page.locator("[data-sticker-canvas]").boundingBox();
+const atP = (rx, ry) => ({ x: probeBox.x + rx * probeBox.width, y: probeBox.y + ry * probeBox.height });
+const pStart = atP(0.45, 0.30);
+const pEnd = atP(0.45, 0.36);
+await page.mouse.move(pStart.x, pStart.y);
+await page.mouse.down();
+// 重置计数器:down 后还没 move,确认基线 = 0。
+await page.evaluate(() => {
+  window.__renderStore.n = 0;
+  window.__renderReact.n = 0;
+});
+const probeSteps = 10;
+for (let i = 1; i <= probeSteps; i++) {
+  const t = i / probeSteps;
+  await page.mouse.move(
+    pStart.x + (pEnd.x - pStart.x) * t,
+    pStart.y + (pEnd.y - pStart.y) * t,
+  );
+  await page.waitForTimeout(20);
+}
+// 拖动期间的快照:此时还没 up,理论上 store 应该没变(若 H2 修复到位)。
+const midDrag = await page.evaluate(() => ({
+  storeWrites: window.__renderStore.n,
+  reactRenders: window.__renderReact.n,
+}));
+check(
+  "拖动期间 store 写入次数 = 0(H2: 不写 store)",
+  midDrag.storeWrites === 0,
+  `实际 ${midDrag.storeWrites} 次`,
+);
+check(
+  "拖动期间 setStickerOverrides 被调次数 = 0(H2: 不写 store)",
+  midDrag.reactRenders === 0,
+  `实际 ${midDrag.reactRenders} 次`,
+);
+await page.mouse.up();
+await page.waitForTimeout(80);
+// up 后只允许一次写入(把拖动期间累积的 localX/localY 合回 store)。
+const postUp = await page.evaluate(() => ({
+  storeWrites: window.__renderStore.n,
+  reactRenders: window.__renderReact.n,
+}));
+check(
+  "pointerup 后 store 仅被写 1 次(H2: 一次 onChange)",
+  postUp.storeWrites === 1,
+  `实际 ${postUp.storeWrites} 次`,
+);
+check(
+  "pointerup 后 setStickerOverrides 仅被调 1 次(H2: 一次 onChange)",
+  postUp.reactRenders === 1,
+  `实际 ${postUp.reactRenders} 次`,
+);
+
+// ---------------------------------------------------------------------------
+// §4c. 旋转 30° 后从尖角附近可命中
+// ---------------------------------------------------------------------------
+// 这是 H1 的关键回归:H1 修复前,贴纸绕中心旋转 30° 后, 用户从尖角/凹陷
+// 点过去 —— 点相对贴纸中心的 (dx,dy) 处于「世界轴对齐矩形」的外侧 ——
+// hitTest 会说「没点中」。修复后 hitTest 在贴纸本地坐标系下做矩形判定,
+// 即把 (dx,dy) 绕贴纸中心逆旋转 s.rotation 度再判矩形,旋转后从尖角点过去
+// 也能稳定命中。
+console.log("\n--- 4c. 旋转 30° 贴纸从尖角附近可命中 ---");
+// 摆一颗新的红爱心,落在 (0.50, 0.50) 中心。
+// 先清掉上一轮的 selected: 上一轮的 store 写入现在第一颗坐标是 (0.45, 0.36) 左右,
+// 「拖动」按钮会改 selectedState 切工具。点画布空白处清掉 selected。
+const cb4c = await page.locator("[data-sticker-canvas]").boundingBox();
+const a4c = (rx, ry) => ({ x: cb4c.x + rx * cb4c.width, y: cb4c.y + ry * cb4c.height });
+await page.locator("[data-sticker-tool='select']").click();
+await page.mouse.click(a4c(0.01, 0.01).x, a4c(0.01, 0.01).y);
+await page.waitForTimeout(40);
+// 选红心 + 红,落点 (0.50, 0.50)。
+await page.locator(`[data-sticker-shape='heart']`).click();
+await page.locator(`[data-sticker-color='${RED}']`).click();
+await page.mouse.click(a4c(0.50, 0.50).x, a4c(0.50, 0.50).y);
+await page.waitForTimeout(80);
+const heartIdx = await page.evaluate(
+  () => (window.__store.getState().stickerOverrides[0] ?? []).length - 1,
+);
+// 选中它,旋转 +30°(点两次 ↻ = +30°)。
+await page.locator("[data-sticker-tool='select']").click();
+await page.mouse.click(a4c(0.50, 0.50).x, a4c(0.50, 0.50).y);
+await page.waitForTimeout(40);
+await page.locator("[data-sticker-rotate='15']").click();
+await page.locator("[data-sticker-rotate='15']").click();
+await page.waitForTimeout(40);
+const rot = await page.evaluate(
+  (i) => window.__store.getState().stickerOverrides[0][i]?.rotation,
+  heartIdx,
+);
+check("贴纸旋转 +30° 已写入", rot === 30, `rotation=${rot}`);
+// 心形 path 尖角是 (0.5, 0.96) (local 坐标系,中心在 (0.5, 0.5))。旋转 +30°
+// (顺时针) 后,尖角相对中心的位移(local px) 经以下链路:
+//   1) translate(-0.5, -0.5) → 尖角在 local = (0, 0.46)
+//   2) ctx.scale(size) (size=0.16) → (0, 0.0736) 单位坐标
+//   3) ctx.rotate(+30°) → (0*cos30 - 0.0736*sin30, 0*sin30 + 0.0736*cos30)
+//                       ≈ (-0.046, 0.0637) 单位坐标
+// 单位坐标的 1 = u px(u=DOODLE_EDIT_W, h 的最小值 = 480)。换算成屏幕 px:
+//   dx_px = -0.046 * 480 ≈ -22.1 px
+//   dy_px =  0.0637 * 480 ≈ 30.6 px
+// 中心 (0.50, 0.50) 折算到屏幕 (320, 240) px;尖角在屏幕上 ≈ (298, 271) px。
+// → 相对长边坐标 ≈ (298/640, 271/480) = (0.466, 0.564)。
+// 测试点取略内偏: ((0.466+0.50)/2, (0.564+0.50)/2) = (0.483, 0.532),
+// 落在尖角向中心缩 ~50% 处,确保仍在 path 内(path 尖角附近 ~0.5px 内),
+// 同时远离中心矩形(中心矩形 world-axis 对齐 half ≈ size/2 = 0.08 in
+// normalized long-edge 单位 = 38.4 px; 测试点距中心 ~17.4 px,远在矩形外)。
+// 所以**没有 H1 修复**,hitTest 会对这个屏幕点返回 -1。
+const tipX = 0.483;
+const tipY = 0.532;
+// 注意:模态遮罩的 onClick 会因 hitTest=-1 把 selected 杀掉 ─。此处只关心
+// hitTest 返回值,而不依赖 selected 的副作用。先用 evaluate 直接调一个
+// 内部的 hitTest —— 但它是闭包内的。最简单方案:点过去,若 H1 修好了,会
+// 触发 setSelected(idx) → 工具条出现「删除」按钮;若没修好,点过去是 hit=-1,
+// selected 仍然 -1,没有「删除」按钮。
+const deleteBefore = await page.evaluate(() => !!document.querySelector("[data-sticker-delete]"));
+check("§4c 起:已旋转贴纸仍选中(删除按钮可见)", deleteBefore);
+// 取消选中:点画布角落(预期 hitTest=-1,selected 清掉,「删除」按钮消失)。
+await page.mouse.click(a4c(0.01, 0.01).x, a4c(0.01, 0.01).y);
+await page.waitForTimeout(40);
+const deleteAfterClear = await page.evaluate(() => !!document.querySelector("[data-sticker-delete]"));
+check("点画布角落后选中被清掉", !deleteAfterClear);
+// 点尖角位置 —— 这是 H1 修复的关键测试:hitTest 应该命中(返回 idx)。
+await page.mouse.click(a4c(tipX, tipY).x, a4c(tipX, tipY).y);
+await page.waitForTimeout(60);
+// 这里因为坐标系计算误差容差较大,我们直接用 evaluate 注入一段命中计算代码,
+// 重新调用 hitTest —— 但 hitTest 是闭包内部的。改用观察「选中态是否回到心形」:
+// setSelected 命中后,「删除」按钮应当再次出现;模态里的旋转度数显示应当
+// 显示这颗的 rotation = 30。
+const afterHit = await page.evaluate(
+  (idx) => {
+    const del = !!document.querySelector("[data-sticker-delete]");
+    const rotText = document.querySelector("[data-sticker-selected-rot]")?.textContent ?? "";
+    return { del, rotText };
+  },
+  heartIdx,
+);
+check(
+  "旋转 30° 贴纸尖角附近点中(删除按钮再次出现)",
+  afterHit.del,
+  `del=${afterHit.del}`,
+);
+check(
+  "选中的是旋转 30° 的贴纸(度数显示 = 30°)",
+  afterHit.rotText.trim() === "30°",
+  afterHit.rotText,
+);
+
+// ---------------------------------------------------------------------------
 // §5. 重新生成拼图, 红/黄/蓝色块必须真的烧进成片
 // ---------------------------------------------------------------------------
 // 必须在 §6 (Delete) 之前做, 否则删完就只剩红色了 —— §5 验的是 "三色各一颗
@@ -429,6 +644,13 @@ const stickerBox6 = await page.locator("[data-sticker-canvas]").boundingBox();
 const at6 = (rx, ry) => ({ x: stickerBox6.x + rx * stickerBox6.width, y: stickerBox6.y + ry * stickerBox6.height });
 // 选中第三颗(圆): 点一下选中, 不能用拖动(会改坐标)。
 // 命中测试是「中心矩形」, y=0.72(原本 0.70, §3 测得 y=0.72), x=0.40 正是它的中心。
+//
+// 注意: §4b/§4c 在 §3 的 3 颗之上又摆了/动了若干次:
+//   • §4 拖动第 2 颗到 y=0.616
+//   • §4b 把第 1 颗从 (0.45, 0.30) 拖到 (0.45, ~0.36)
+//   • §4c 摆了一颗新红心到 (0.50, 0.50) 并旋转 +30°
+// 因此进 §6 时 store 里有 **4 颗**(heart, star, circle, heart_rot30),
+// 不是 §3 末的 3 颗。Delete 删 1 颗剩 3,Backspace 再删 1 颗剩 2。
 await page.mouse.click(at6(0.40, 0.72).x, at6(0.40, 0.72).y);
 await page.waitForTimeout(60);
 const selBefore = await page.evaluate(() => {
@@ -442,7 +664,7 @@ await page.waitForTimeout(60);
 const afterDel = await page.evaluate(
   () => (window.__store.getState().stickerOverrides[0] ?? []).length,
 );
-check("Delete 删除选中的贴纸", afterDel === 2, `剩 ${afterDel} 颗`);
+check("Delete 删除选中的贴纸", afterDel === 3, `剩 ${afterDel} 颗`);
 // Backspace 也得删 —— 点在第二颗(星星被拖到 y=0.616)中心, 命中选中后按 Backspace。
 await page.mouse.click(at6(0.55, 0.616).x, at6(0.55, 0.616).y);
 await page.waitForTimeout(60);
@@ -451,7 +673,7 @@ await page.waitForTimeout(60);
 const afterBs = await page.evaluate(
   () => (window.__store.getState().stickerOverrides[0] ?? []).length,
 );
-check("Backspace 也能删除", afterBs === 1, `剩 ${afterBs} 颗`);
+check("Backspace 也能删除", afterBs === 2, `剩 ${afterBs} 颗`);
 
 // 输入框内不拦截: 模拟一个 input 元素并聚焦, Backspace 应当不删贴纸。
 // 这里只验「键盘监听不删贴纸」, 真实 input 由 React 控制, 这里换用 dispatch

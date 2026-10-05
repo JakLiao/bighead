@@ -132,11 +132,6 @@ function toRelative(e: React.PointerEvent<HTMLCanvasElement>) {
   return { x: Math.min(1, Math.max(0, x)), y: Math.min(1, Math.max(0, y)) };
 }
 
-/** 命中判定用的形状外接矩形半边长(相对短边)。与 paintSticker 的 size 基准同源。 */
-function halfSize(s: StickerPlacement, u: number) {
-  return (s.size * u) / 2;
-}
-
 function isEditingText(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null;
   if (!el) return false;
@@ -169,10 +164,34 @@ export function StickerEditor({
   // 正在拖动的贴纸。放 ref 不放 state: 拖动过程中每一帧都要算新坐标,
   // 放 state 会让"拖动"变成"每个 pointermove 触发一次 React 重渲染 +
   // 一次 store 写入", 手感发木。
-  const dragRef = useRef<{ idx: number; offX: number; offY: number } | null>(null);
+  //
+  // localX/localY 是"拖动期间**这一颗**的当前帧覆盖坐标":只动这一颗而不
+  // 写 store,up 时再一次性 onChange 合进完整列表。父组件不会因为这一颗
+  // 的位置而整体重渲染,选中/角标/其它贴纸都保持上一帧的稳定状态。
+  const dragRef = useRef<{
+    idx: number;
+    offX: number;
+    offY: number;
+    localX: number;
+    localY: number;
+  } | null>(null);
 
+  /**
+   * 渲染当前一帧。拖动期间把「正在拖的这一颗」用 dragRef.localX/localY
+   * 临时覆盖,**不**走 store —— 这样拖动期间的视觉跟随不走 React。
+   * 其余贴纸一律读 stickers。
+   */
   const repaint = useCallback(() => {
-    paintStickers(canvasRef.current?.getContext("2d") ?? null, stickers, selected);
+    const ctx = canvasRef.current?.getContext("2d") ?? null;
+    if (!ctx) return;
+    const drag = dragRef.current;
+    const list =
+      drag && drag.idx >= 0 && drag.idx < stickers.length
+        ? stickers.map((s, i) =>
+            i === drag.idx ? { ...s, x: drag.localX, y: drag.localY } : s,
+          )
+        : stickers;
+    paintStickers(ctx, list, selected);
   }, [stickers, selected]);
 
   useEffect(() => {
@@ -185,25 +204,36 @@ export function StickerEditor({
    * 倒序遍历(而不是正序)是因为数组顺序即叠放顺序 —— 后加的盖在上面,
    * 点到重叠处时用户想抓的必然是最上面那颗。
    *
-   * 用中心矩形(size×size 的轴对齐盒, 不算旋转)而非外接圆 / 精确 path:
+   * 用中心矩形而非外接圆 / 精确 path:
    *  - 极坐标形状(星/花)精确命中要写射线法, 几十行换来的精度用户感知不到;
    *  - 用外接圆会在稀疏的星形上"明明点在洞里也能拖", 让"点近抓住手感"打折;
-   *  - 矩形 = 形状的轴对齐包围盒, 对花/星/心形都能稳定"点进贴纸内就抓到",
-   *    与形状的旋转无关 —— 旋转只影响视觉位置, 抓的中心区域不变。
+   *  - 矩形 = 形状的轴对齐包围盒, 对花/星/心形都能稳定"点进贴纸内就抓到"。
+   *
+   * **必须把 (dx,dy) 绕贴纸中心逆旋转 s.rotation 度再判矩形**。否则心/
+   * 星绕 30° 后用户从尖角点过去,点明明落在贴纸的可视范围内,中心矩形却
+   * 说"没点中"。旋转判定等价于"在贴纸的本地坐标系里问点在哪":把世界向量
+   * 旋转 -θ 后,贴纸回到了轴对齐位置,再用中心矩形即可。
    */
   const hitTest = useCallback(
     (x: number, y: number) => {
       const u = Math.min(width, height);
       for (let i = stickers.length - 1; i >= 0; i--) {
         const s = stickers[i];
-        const half = halfSize(s, u);
+        const half = (s.size * u) / 2;
         if (half <= 0) continue;
         const dx = (x - s.x) * u;
         const dy = (y - s.y) * u;
-        // 轴对齐矩形: |dx| <= half 且 |dy| <= half。中心矩形就是贴纸的
-        // 轴对齐包围盒, 旋转不影响"点哪、抓到哪" —— 贴纸自转 30° 后,
-        // 用户仍按视觉中心点过去, 中心矩形照常命中。
-        if (Math.abs(dx) <= half && Math.abs(dy) <= half) return i;
+        // (dx,dy) 绕中心逆旋转 s.rotation 度:等价于把点转到贴纸的本地轴上。
+        // 旋转矩阵 [[cos, sin], [-sin, cos]] 应用于 (dx,dy) 得:
+        //   ldx = dx*cos + dy*sin
+        //   ldy = -dx*sin + dy*cos
+        // 无 rotation 时退化为 (dx, dy) 自身,与旧行为一致。
+        const rot = ((s.rotation ?? 0) * Math.PI) / 180;
+        const cos = Math.cos(rot);
+        const sin = Math.sin(rot);
+        const ldx = dx * cos + dy * sin;
+        const ldy = -dx * sin + dy * cos;
+        if (Math.abs(ldx) <= half && Math.abs(ldy) <= half) return i;
       }
       return -1;
     },
@@ -216,12 +246,30 @@ export function StickerEditor({
     if (tool === "select") {
       const hit = hitTest(p.x, p.y);
       setSelected(hit);
-      if (hit < 0) return;
+      if (hit < 0) {
+        // 命中失败时也吞掉事件: 外层装饰板的 onClick 会把 editingIdx 置空,
+        // 即"点空白处等于关闭模态"。此处点空白再触发关闭是预期,但当用户
+        // 在画布上点到了已有贴纸却没命中(旋转后尖角附近的轴对齐矩形外),
+        // 二次点击会把模态关掉 —— 这是 H1 修之前的失败语义。命中后也
+        // stopPropagation,避免重入事件链(例如外层挂的监听器因 React 18
+        // 事件批处理被多触发一次)。
+        e.stopPropagation();
+        return;
+      }
       const s = stickers[hit];
       // 记下"指针相对贴纸中心的偏移": 不记的话贴纸中心会瞬移到指针处,
       // 抓的时候视觉上"跳一下", 抓角上时还会把贴纸甩出去。
-      dragRef.current = { idx: hit, offX: s.x - p.x, offY: s.y - p.y };
+      dragRef.current = {
+        idx: hit,
+        offX: s.x - p.x,
+        offY: s.y - p.y,
+        localX: s.x,
+        localY: s.y,
+      };
       e.currentTarget.setPointerCapture(e.pointerId);
+      // 命中贴纸后不再让外层吃到这次事件,否则同一 pointerup 链上外层
+      // onClick 会把 editingIdx 置 null,模态立刻关掉。
+      e.stopPropagation();
       return;
     }
     // 放置态: 落点即新贴纸中心。放完回到 select 并选中它, 用户接着就能拖。
@@ -239,27 +287,46 @@ export function StickerEditor({
     onChange(next);
     setSelected(next.length - 1);
     setTool("select");
+    // 落点成功: 别让同 pointerup 链上外层 onClick 关闭模态。
+    e.stopPropagation();
   };
 
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
     const p = toRelative(e);
-    const next = stickers.slice();
-    const cur = next[drag.idx];
-    // 偏移反解: 指针落在中心就保持原位, 落在角上贴纸也不会跳。
-    next[drag.idx] = {
-      ...cur,
-      x: Math.min(1, Math.max(0, p.x + drag.offX)),
-      y: Math.min(1, Math.max(0, p.y + drag.offY)),
-    };
-    onChange(next);
+    // 拖动期间**只**写本地 ref + 主动重画, 不调 onChange → 不写 store →
+    // 不触发父组件订阅者重渲染(选中/计数/角标等)。up 时再一次性 onChange
+    // 合进完整列表。这是把"每帧写 store"压成"一次写 store",对 H2 的关键
+    // 修复。坐标系仍按照片相对 0..1 夹紧, 防止指针被 capture 后滑出画布
+    // 落到 1.05 / -0.05 这种异常坐标。
+    drag.localX = Math.min(1, Math.max(0, p.x + drag.offX));
+    drag.localY = Math.min(1, Math.max(0, p.y + drag.offY));
+    repaint();
   };
 
   const endDrag = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    if (drag && (drag.localX !== stickers[drag.idx]?.x || drag.localY !== stickers[drag.idx]?.y)) {
+      // 拖动期间确实移动过: 把 localX/localY 合回 store,这是整个拖动过程
+      // 唯一一次 onChange。其余 onChange(选中态变化等)由各自的回调独立触发,
+      // 互不影响。
+      const next = stickers.slice();
+      next[drag.idx] = { ...next[drag.idx], x: drag.localX, y: drag.localY };
+      onChange(next);
+    }
     dragRef.current = null;
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
+    // releasePointerCapture 在 pointercancel/失焦后调用会抛 InvalidStateError
+    // (Pointer already released / Not in active pointer state)。try/catch
+    // 是必须的 —— 没保护的话一个被 cancel 的拖动会在控制台留下红色堆栈,
+    // 且流程被未捕获异常打断,后续 onPointerUp / state 更新都不会跑。
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {
+      // 静默吃掉: pointer 主动结束/cancel 时再 release 是无意义的,但出错
+      // 不应影响业务流程。
     }
   };
 
@@ -333,6 +400,12 @@ export function StickerEditor({
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
+        // onPointerDown 里已 stopPropagation,但 pointer 与 click 是两条独立
+        // 事件链:pointerdown 之后浏览器仍会触发一次原生 click,在 React 事件
+        // 树上冒泡到外层,触发装饰页 onClick={setEditingIdx(null)} 把模态关掉。
+        // 补一个 click 也 stopPropagation,确保画布上任何落点/拖动都不被外层
+        // 误判成"点空白处=关闭"。
+        onClick={(e) => e.stopPropagation()}
       />
 
       {/* 形状工具条。放画布内而不是模态顶部: 摆放是"看着照片点"的动作,
@@ -434,12 +507,19 @@ export function StickerEditor({
         贴纸与笔迹的"会不会被裁"才必然一致。若贴纸自己写一份常量,
         排版一换(6inch_4p 裁的是上下)就会出现"笔迹提示对了、贴纸提示错了"。
         详见 DoodleCanvas 里 data-doodle-safe 遮罩的注释。
+
+        **z-20 把遮罩抬到色板工具条之上**:遮罩是「被裁区提示」, 用户必须
+        能清楚看到它「压暗了多少、覆盖到哪」。若 z 与工具条平级或更低,
+        色板的白色背景/阴影会把遮罩完全吃掉, 一旦边角被工具条压住, 用户
+        会以为排版没裁而把贴纸摆进去 —— 结果就是出片被静默切掉。遮罩是
+        `pointer-events-none`, 把它抬高不会拦截工具条点击, 只影响视觉
+        层级。
       */}
       {safe.left > 0 && (
         <div
           data-sticker-safe="left"
           aria-hidden
-          className="pointer-events-none absolute inset-y-0 left-0 bg-black/45"
+          className="pointer-events-none absolute inset-y-0 left-0 z-20 bg-black/45"
           style={{ width: `${safe.left * 100}%` }}
         />
       )}
@@ -447,7 +527,7 @@ export function StickerEditor({
         <div
           data-sticker-safe="right"
           aria-hidden
-          className="pointer-events-none absolute inset-y-0 right-0 bg-black/45"
+          className="pointer-events-none absolute inset-y-0 right-0 z-20 bg-black/45"
           style={{ width: `${safe.right * 100}%` }}
         />
       )}
@@ -455,7 +535,7 @@ export function StickerEditor({
         <div
           data-sticker-safe="top"
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 top-0 bg-black/45"
+          className="pointer-events-none absolute inset-x-0 top-0 z-20 bg-black/45"
           style={{ height: `${safe.top * 100}%` }}
         />
       )}
@@ -463,7 +543,7 @@ export function StickerEditor({
         <div
           data-sticker-safe="bottom"
           aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/45"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-20 bg-black/45"
           style={{ height: `${safe.bottom * 100}%` }}
         />
       )}
