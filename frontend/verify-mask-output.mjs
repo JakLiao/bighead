@@ -9,6 +9,7 @@
  * 比较同一坐标的像素是否一致。留 2 级容差,容忍 JPEG 压缩。
  */
 import { chromium } from "playwright";
+import { burstTo } from "./maskBurstHelper.mjs";
 
 const URL = process.env.APP_URL || "http://localhost:5173/home";
 const PASS = [];
@@ -120,13 +121,7 @@ await page.evaluate(() => {
 });
 await page.keyboard.press("Space");
 // 等 4 张连拍完成(3 秒倒计时 ×4)
-await page.waitForFunction(
-  () => {
-    const s = window.__store;
-    return s && s.getState().frames.length >= 4;
-  },
-  { timeout: 60000 },
-);
+await burstTo(page, 4);
 await page.waitForTimeout(500);
 
 const burn = await page.evaluate(() => {

@@ -13,6 +13,7 @@
  * 所以这里直接读 canvas 像素来判定,而不是只看截图。
  */
 import { chromium } from "playwright";
+import { burstTo } from "./maskBurstHelper.mjs";
 
 const URL = process.env.APP_URL || "http://localhost:5173/home";
 
@@ -106,7 +107,7 @@ await page.locator('[data-mask="none"]').click();
 await page.waitForTimeout(300);
 await page.evaluate(() => window.__store.getState().setFrames([]));
 await page.keyboard.press("Space");
-await page.waitForFunction(() => window.__store.getState().frames.length >= 4, { timeout: 60000 });
+await burstTo(page, 4);
 
 const burn = await page.evaluate(async () => {
   // frames 元素现在是 {url, burnedIn} 而非裸 dataURL 字符串(见 store.ts 的 Frame)。
