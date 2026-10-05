@@ -5,6 +5,7 @@ import asyncio
 import gc
 import logging
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +23,7 @@ from .config import (
     FACEID_SCALE,
     IPADAPTER_FACEID_SD15,
     IPADAPTER_FACEID_SDXL,
+    LAYOUT_FILENAME,
     LORA_SCALE,
     OUTPUT_DIR,
     SD15_CKPT,
@@ -796,13 +798,33 @@ def build_ai_layout(image_paths: list[str], out_dir: Path) -> str | None:
         pils = [Image.open(p).convert("RGB") for p in image_paths]
         # frame 用 "none": AI 成片已在风格阶段定调, 再叠一层相框会压掉效果。
         data = collage_to_bytes(pils, "2x2", "none")
-        out = out_dir / "layout.jpg"
+        out = out_dir / LAYOUT_FILENAME
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_bytes(data)
+        _mirror_layout_to_top(out)
         return f"/{out.relative_to(OUTPUT_DIR.parent).as_posix()}"
     except Exception:
         log.exception("AI 拼图失败, 降级为只展示单图")
         return None
+
+
+def _mirror_layout_to_top(out: Path) -> None:
+    """把 ai/{style}/layout.jpg 复制一份到 job 目录顶层。
+
+    gallery.py 只探测 outputs/{job_id}/layout.jpg, **不递归**进 ai/。
+    不写这份顶层副本, AI 拼图在贴纸册里就永远只显示 4 张单图缩略图,
+    那张拼图本身从不出现 —— 而它恰恰是这一轮最该被看到的东西。
+
+    失败只 warn 不抛: 这是一份冗余副本, 写不出来不影响 AI 成片本身,
+    也不该让整条 build_ai_layout 走进 except 分支返回 None。
+    """
+    try:
+        top = out.parent.parent.parent / LAYOUT_FILENAME
+        if top == out:
+            return
+        shutil.copyfile(out, top)
+    except (OSError, NameError):
+        log.warning("复制顶层 %s 失败, 贴纸册将只显示单图", LAYOUT_FILENAME, exc_info=True)
 
 
 def _clip_vision_path() -> Path:
