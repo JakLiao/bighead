@@ -255,9 +255,9 @@ AI:    capture/save → job 目录 + photo_N.jpg
 
 ### 复核后仍存在
 
-1. **AI 路径的顶层 `layout.jpg` 占双份磁盘**（`ai/{style}/` 与顶层内容相同，约 1–2MB）。
+1. **AI 路径的顶层 `layout.jpg` 占双份磁盘**（`ai/{style}/` 与顶层内容相同，约 1–2MB）。→ **已在技术债清收中改为硬链接**，见下方「技术债清收」§1。
 2. **搜索无 debounce**——数十条数据无感，条目上千时需要重抽。
-3. **2 个 lint warning 仍在**（`AlbumEditor` / `GalleryPage` 的 effect 内同步 setState）。属 React 18 下的可接受写法：状态重置需要在 `initial` 变化时发生，改成异步会引入一帧的旧值。已确认不是本次引入。
+3. **2 个 lint warning 仍在**。⚠️ 本条原先把位置记成 `AlbumEditor` / `GalleryPage` 的 effect 内同步 setState，**这是错的**：实际是 `CountdownOverlay.tsx:39` 与 `AlbumEditor.tsx:36`，`GalleryPage` 从头到尾没有这条 warning（它那处是异步 IIFE + cancelled 守卫，规则不判）。已在本轮清收中修掉，见下方「技术债清收」§3。
 
 ---
 
@@ -369,3 +369,136 @@ npm run dev
 cd frontend
 .\run-all-verify.ps1
 ```
+
+---
+
+# 技术债清收（2026-10-06）
+
+P2 收尾后的三项遗留技术债。全部走 TDD：先写会失败的测试，再改实现，最后变异验证断言有牙齿。
+
+## §1 双份磁盘 → 硬链接
+
+`_mirror_layout_to_top`（[pipeline.py](../backend/pipeline.py)）此前用 `shutil.copyfile` 把 `ai/{style}/layout.jpg` **再存一份**到 job 顶层。这份顶层入口是必需的（`gallery.py` 只探测顶层、不递归进 `ai/`），但存两份是纯浪费，每轮 1–2MB。
+
+改用 `os.link` 硬链接：两条路径指向同一份数据，磁盘只占 1 份。硬链接对读方完全透明——Pillow 正常打开、gallery 的 `stat` 探测照常成立。失败（跨卷、目标已存在）退回拷贝：宁可占双份，也不能让贴纸册里看不到这一轮拼图。
+
+新增 [verify_mirror.py](../backend/scripts/verify_mirror.py)（11 项）：
+
+```
+Result: 11 passed, 0 failed / ALL GREEN
+```
+
+**测试自己写错了一条**：初版断言「字节数不翻倍」——拷贝后两个文件 `st_size` 同样相等，这条**恒为真、证明不了任何东西**。真正有区分力的只有 inode 相同与 `nlink >= 2`。已删掉那条并在注释里写明为什么不能这么断言。
+
+### 硬链接引入的真问题：覆写顶层会连带毁掉 AI 拼图
+
+硬链接不是「两份数据」，而是**一个 inode 两个名字**。任何对顶层 `layout.jpg` 的**原地覆写**都会透过链接改到 `ai/{style}/layout.jpg`。
+
+而这条路径真实存在：非 AI 拼图（前端 `makeLayoutToJob`）会带 `job_id` 调 `/api/layout/make`，后端执行 `write_bytes`——**`open(O_TRUNC)` 语义，不是 unlink+create**。同一个 job 先跑 AI 写真（已建链接）、再补一次普通拼图，AI 拼图就被清空，而 gallery 缩略图仍指向顶层，**表面看不出任何异常**。
+
+实测（`verify_mirror.py` 钉住的断言，修复前）：
+
+```
+[FAIL] 顶层被覆写后, ai/{style}/layout.jpg 内容不受影响  deep=b'non-ai-collage'
+[FAIL] 覆写后顶层与深层已解绑(不再是同一个 inode)
+```
+
+修法：[layout.py](../backend/routes/layout.py) 改成**写临时文件 + `os.replace`**。`os.replace` 是 rename 语义——新数据写进独立 inode 再原子换名，只动顶层那个名字，硬链接指向的 AI 拼图分毫不动。临时文件与目标同目录，保证 replace 不跨卷。
+
+这条断言**走真实的 `layout_make`** 而不是复刻它的写法：复刻的那份会随 `layout.py` 改动而失效，于是断言还在绿、bug 已经回来。变异验证（把 `os.replace` 还原成 `write_bytes`）→ 精确 2 项失败；还原修复 → 11/11。
+
+## §2 硬编码路径 → config.py + 环境变量
+
+`E:\Code\stable-diffusion-webui` 硬编码在 3 个运行时模块：`config.py`（权威来源）、`qwen_worker.py`（又抄了 4 条）、`pipeline.py`（`sd_xl_base.yaml` 又抄了一遍）。另有 11 个 `scripts/*.py` 一次性调试脚本各抄一份（不在运行时链路上，本次不动）。
+
+现在：
+- `config.MODEL_BASE` 支持 `BIGHEAD_MODEL_BASE` 环境变量覆盖，换机器不用改代码；不设时默认值不变
+- `config.WEBUI_ROOT`（= `MODEL_BASE.parent`）供 pipeline 取 `sd_xl_base.yaml`
+- `qwen_worker.py` 四个路径常量改为从 `backend.config` 导入
+
+新增 [verify_paths.py](../backend/scripts/verify_paths.py)（13 项），含用 `.venv-qwen` **真实导入**比对四个常量逐一相等。
+
+```
+Result: 13 passed, 0 failed / ALL GREEN
+```
+
+### 过程中撞到两个真问题
+
+**(1) `qwen_worker.py` 以脚本方式启动时 `backend` 包不可见。**
+`qwen_pipeline` 是用 `QWEN_PYTHON + qwen_worker.py 文件路径` 拉起子进程的，此时 `sys.path[0]` 是 `backend/` 目录本身。改成 `from backend.config import ...` 后直接 `ModuleNotFoundError: No module named 'backend'`——**这会直接打断 AI 写真链路**。已在 worker 里先把项目根插入 `sys.path`。用真实脚本方式启动验证：`rc=0`，stdout 拿到合法 boot 帧 `{"ok": true, "event": "boot", ...}`。
+
+这个坑只有在**真的按生产方式启动一次**时才会暴露，静态检查（ruff / import 解析）全绿。
+
+**(2) `preflight.py` 用正则解析 `config.py` 源码——隐藏耦合。**
+`_suggest_interpreter()` 靠正则读 `MODEL_BASE = Path(r"...")` 来推导该用哪个解释器。`MODEL_BASE` 改成环境变量写法后，它**静默返回 `None`**：用错解释器时服务照常启动、连拍拼图全都能用，只有点 AI 生成才炸，而此时恰恰不再提示该用哪个解释器。
+
+修法不是「import config」（那会让 preflight 丧失「依赖坏了也能跑」的职责），而是把正则改成**有界窗口**内找字面量，对代码怎么换行、对齐、加注释都免疫。
+
+中间踩了一次坑：先写成 `MODEL_BASE\s*=(.*?)\n\s*\w` + `re.S`，非贪婪在**第一个**换行处就满足，实际只抓到 ` Path(` 就断了。断言当场变红才暴露出来——这就是把它写成测试的价值。
+
+**教训**：正则读源码是脆弱耦合。改动那个源码的**写法**（而非值）就会静默失效，且失效形态是「返回 None」而不是报错。凡是这么用的地方，都值得配一条断言。
+
+### 变异验证
+
+把 `pipeline.py` 的 `sd_xl_yaml` 临时改回字面硬编码 → 精确 2 项变红（`backend/ 运行时模块无字面硬编码 webui 路径` + `pipeline.py 不再硬编码 sd_xl_base.yaml 路径`）→ 恢复 → 13/13 绿。证明断言有区分力而非恒真。
+
+## §3 两处 set-state-in-effect → key 重挂载
+
+原先两处 lint warning 的位置在文档里**记错了**（说是 `AlbumEditor` / `GalleryPage`，实际是 `CountdownOverlay.tsx:39` + `AlbumEditor.tsx:36`；`GalleryPage` 那处是异步 IIFE + cancelled 守卫，规则不判）。已在上面「剩余遗留」里更正。
+
+修法用 React 官方的「派生状态用 key 重置」范式，而不是 `eslint-disable` 注释：
+
+| 组件 | 改法 |
+|---|---|
+| `CountdownOverlay` | 父组件传 `key={snapTick}`，effect 开头不再 `setN(from)` / `setActive(true)` |
+| `AlbumEditor` | 父组件传 `key={editing.job_id}`，删掉 `useEffect([initial, jobId])` 重置块 |
+
+顺带**修掉一个原有的 UX 缺陷**：`AlbumEditor` 原来在 `reload()` 拉回新 `items` 之后会把输入框重置成服务端值——用户刚敲的字会消失。改成 key 重挂载后，`jobId` 不变就不重挂载，本地内容保留。
+
+`CountdownOverlay` 顺带去掉了 `active` 这个 state（渲染条件改成 `tick <= 0 || n <= 0`），倒计时数字不再闪上一轮的残留值。
+
+lint 从 2 warnings → **0**（`npx eslint src` 输出 0 字节、exit 0）。注意 `npm run lint` 在本机会因 npm 写 `E:\nodejs\node_cache\_logs` 被沙箱拦掉，要用 `npx eslint src` 直接跑。
+
+### 行为等价性验证
+
+这两处是**行为重构**，lint 绿证明不了等价。真实 E2E 证据：
+
+```
+verify-burst.mjs          => PASS 连拍完成（4/4，RetakeBar 暂停 3 次，跳转 /decorate）
+verify-album-edit.mjs     Result: 22 passed, 0 failed
+verify-album-search.mjs   Result: 35 passed, 0 failed（含 Escape / dirty 置灰 / 删除）
+```
+
+## 全量门禁
+
+| 门禁 | 结果 |
+|---|---|
+| 依赖预检 | `PY= E:\Code\...\python.exe` + `OK` |
+| `ruff check backend scripts` | All checks passed |
+| `python -m compileall -q backend scripts` | OK |
+| `npx tsc -b --force` | 无错误 |
+| `npx eslint src` | 0 problems, 0 bytes 输出 |
+| `run-all-verify.ps1`（18 脚本） | **TOTAL: 445 passed, 0 failed / ALL GREEN** |
+| `verify_mirror.py` | 8 passed |
+| `verify_paths.py` | 13 passed |
+| `verify_share_card.py` | 44 passed |
+| `verify_album_meta.py` | 25 passed |
+
+E2E 断言总数与改动前基线**完全一致（445）**，无回归。后端自测从 69 项增到 90 项。
+
+> 注意：8077 上可能已有**改动前**启动的旧后端进程在跑。验证后端改动前先确认进程启动时间，否则测的是旧代码。
+
+## 新脚本运行方式
+
+两个新脚本是 Python 的、跑在 `backend/`，**故意没有**加进 `frontend/run-all-verify.ps1`（那个脚本只管 Node 脚本，混入 Python 会让它的退出码/崩溃检测语义变浑浊）：
+
+```powershell
+& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_mirror.py
+& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_paths.py
+```
+
+## 本轮未做（明确留给后续）
+
+- `scripts/` 下 11 个一次性脚本的硬编码路径（多数文件名带 `_` 前缀，不在运行时链路上）
+- 服务绑 `0.0.0.0` 无鉴权 —— 需产品决策：仅限可信局域网还是加认证
+- 搜索无 debounce
