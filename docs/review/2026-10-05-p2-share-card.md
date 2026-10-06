@@ -241,19 +241,113 @@ AI:    capture/save → job 目录 + photo_N.jpg
 
 ## 剩余遗留
 
-### 原 P1 清单中未清的四项
+### 原 P1 清单 — 已全部清完
 
-1. 清空所有条目后 `_album.json` 残留空文件
-2. 无 `prefers-reduced-motion`（2 个 lint warning 也属此类）
-3. 损坏的元数据备份不自动清理
+| 遗留 | 状态 |
+|---|---|
+| 清空所有条目后 `_album.json` 残留空文件 | ✅ 已清（见下方复核 §2） |
+| 无 `prefers-reduced-motion` | ✅ 已清（见下方复核 §3） |
+| 损坏的元数据备份不自动清理 | ✅ 已清（见下方复核 §2） |
+| 标签去重只在前端 | ✅ P2 已在后端补齐 |
+| no-op PATCH 仍更新 `updated_at` | ✅ P2 已拦截 |
+| 无搜索/筛选 | ✅ P2 已实现 |
+| Escape 不关闭贴纸册编辑器 | ✅ P2 已实现 |
 
-### 本次新增的遗留
+### 复核后仍存在
 
-1. **前后端分享卡几何常量重复**——两处独立实现，不一致时只有肉眼能发现。
-2. **AI 路径的顶层 `layout.jpg` 占双份磁盘**（`ai/{style}/` 与顶层内容相同，约 1–2MB）。
-3. **中文渲染依赖 Windows 字体**——`msyh.ttc` 本机确认存在，换到别的平台会退化到 `arial.ttf` 而**静默排出豆腐块**（PIL 不抛异常）。
-4. **画布合成失败静默回落**——`renderShareCard` 在 `getContext` 失败或 `toBlob` 返回 null 时回落到原拼图，不抛错。分享卡会缺失但用户能继续用。
-5. **搜索无 debounce**——数十条数据无感，条目上千时需要重抽。
+1. **AI 路径的顶层 `layout.jpg` 占双份磁盘**（`ai/{style}/` 与顶层内容相同，约 1–2MB）。
+2. **搜索无 debounce**——数十条数据无感，条目上千时需要重抽。
+3. **2 个 lint warning 仍在**（`AlbumEditor` / `GalleryPage` 的 effect 内同步 setState）。属 React 18 下的可接受写法：状态重置需要在 `initial` 变化时发生，改成异步会引入一帧的旧值。已确认不是本次引入。
+
+---
+
+## P2 交付后的复核（2026-10-06）
+
+P2 提交后做了一轮回查，发现 **4 个问题**（1 个测试盲点 + 2 个静默失败 + P1 遗留三项），全部已修。
+
+### 复核 §1：UI 出片链路从未被 e2e 跑过（测试盲点）
+
+`verify-share-card.mjs` 全部是**直接打 API**，而 P2 真正的新逻辑在 [DecoratePage.doLayout](../frontend/src/pages/DecoratePage.tsx) 里：
+
+```
+saveCaptures → makeLayoutToJob → renderShareCard → saveShareCard
+```
+
+纯 API 测试**完全绕过了**这一段。而且这三个点都会静默出错：
+
+| 出错方式 | 页面表现 |
+|---|---|
+| 忘传 `job_id` | 照常出图（服务端不落盘是设计如此） |
+| `layoutUrl` 仍是 `blob:` | 页面上能看，刷新就消失 |
+| `saveShareCard` 传错 job | 分享卡落到别的 job，本轮没有卡 |
+
+唯一可靠的判据是**去磁盘上核对**。
+
+新增 [verify-decorate-persist.mjs](../frontend/verify-decorate-persist.mjs)（22 项）：走完整 UI 流程（拍摄 → 出片 → 落盘），然后直接读 `outputs/{job_id}/` 下的文件核对尺寸与存在性。
+
+实测结果：`layout.jpg` 1320×1800、`share.jpg` 严格 1200×900、4 张 `photo_N.jpg` 均落盘、贴纸册缩略图优先 `share.jpg`、刷新后仍可访问。
+
+**教训**：「API 层测试通过」不等于「用户路径可用」。凡是有多步编排的链路，测试必须走完整个编排，否则中间任何一步接错都测不出来。
+
+### 复核 §2：静默失败 #1 — 字体全缺失时 footer 空白且无告警
+
+复现：把字体候选链全部指向不存在的路径，`render_share_card` 仍输出一张**尺寸完全正确**的 4:3 卡片，只是 footer 一片空白。
+
+如果没有这条日志，这种卡会被当成生成成功——它确实「成功」了，只是没有文字，而这种退化在生产上几乎不可能被肉眼发现（每张卡都缺 footer）。
+
+修法：`_load_font` 在候选链全挂时 `log.warning` 一次（**不抛异常**——抛异常会让补生成路径整条挂掉）。
+
+### 复核 §3：静默失败 #2 — 画布合成失败会产出「假分享卡」
+
+`renderShareCard` 原实现在 `getContext` 失败或 `toBlob` 返回 null 时**回落到原拼图**。于是会产生一张：
+
+> 文件名叫 `share.jpg`、内容其实是原始拼图的东西
+
+它看起来完全正常，只是缺了 4:3 卡框和 footer——属于典型的静默错误产物。
+
+修法：改为返回 `null`，三处调用点显式处理（合成失败只是这一轮没有卡，拼图本身已落盘可用）。
+
+### 复核 §4：P1 遗留三项
+
+| 项 | 修法 |
+|---|---|
+| `_album.json` 空残留 | `_save_album` 在 `album` 为空时 `unlink` 而非写 `{}`——空文件与「文件不存在」对读端是同一含义 |
+| 损坏备份堆积 | 新增 `_prune_broken_backups`，写盘时保留最近 3 个、删掉更旧的 |
+| 无 `prefers-reduced-motion` | `index.css` 加 `@media` 块覆盖全部 4 个动画类 |
+
+`prefers-reduced-motion` 的降级策略是「去动画、保终态」而不是 `display:none`：倒计时数字（`.countdown-num`）与 pose 提示都靠动画结束后的 `opacity:1` 呈现，直接隐藏会让用户彻底看不到倒计时。
+
+### 复核 §5：把「自觉」变成门禁
+
+P2 计划里我写过一句「前后端几何常量不一致时只有肉眼能发现」。复核时认为这话不该接受——两边都是纯数字字面量，机器完全可以读前端源码比对。
+
+`verify_share_card.py` 新增 8 项断言：用正则读 `frontend/src/shareCard.ts`，比对 5 个数值常量 + 品牌文案 + `shortJobId` 是否复用常量。
+
+**做了变异验证**（把前端 `900` 改成 `888` → 断言变红；还原 → 变绿），证明它真的有牙齿而非恒为真。断言恒为真的门禁比没有门禁更危险——它给人虚假的安全感。
+
+### 复核 §6：又一次「测试红 ≠ 实现错」
+
+`_album.json` 清理的测试首轮 2 红，逐个查证：
+
+| 失败 | 真相 |
+|---|---|
+| `元数据清空时备份也清掉` | 我的断言写错——`_prune` 语义是「保留最近 3 个」不是「清空目录」 |
+| `坏 JSON 被备份`（计数 2≠1） | 测试用假序号 `broken-1000..1004` 造备份，与真实时间戳命名混排，验证了一个不会发生的场景 |
+
+第二次仍然错：`_prune` 按 mtime 排序，我用人工序号验证排序本身就不成立。改成用真实时间戳命名后通过。
+
+另外 `ruff` 抓到我在同一批改动里写的 `logging as _logging` 与 `logging` 混用（`F821 Undefined name`），已统一。
+
+### 复核后验证结果
+
+```
+TOTAL: 445 passed, 0 failed   (18 个脚本)
+ALL GREEN
+```
+
+后端自测 67 项（复核前 44），既有 `verify_album_meta.py` 25 项无回归。新增两个脚本：`verify-decorate-persist.mjs`(22)、`verify-reduced-motion.mjs`(7)。
+
+`verify-reduced-motion.mjs` 用 computed style 而非截图验证：截图只能证明「看起来没动」，证明不了 `animation` 属性真被置为 `none`；更要防的是「新加动画类时忘了加进降级名单」——那种回归在截图里几乎看不出来，但会让本脚本变红。
 
 ---
 
