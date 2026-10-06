@@ -50,20 +50,39 @@ def missing_ai_deps() -> list[tuple[str, str]]:
 
 
 def _suggest_interpreter() -> str | None:
-    """按 README 里的约定猜一个可用的解释器路径。"""
+    """按 README 里的约定猜一个可用的解释器路径。
+
+    这里刻意**不** import config: 本模块的职责就是在依赖出问题时
+    还能跑起来, 而 config 会做一串 import 副作用(peft 补丁、HF 缓存目录
+    创建), 那些正是可能出错的部分。
+
+    代价是要用正则读 config.py 源码。MODEL_BASE 现在是
+    `Path(os.environ.get("BIGHEAD_MODEL_BASE", r"E:\\Code\\...\\models"))`,
+    正则必须同时吃下「字面默认值」和「环境变量名」两种形态 ——
+    早先只认 `Path(r"...")` 那种写法, 改成环境变量后这里静默返回 None,
+    「用错解释器」时就不再提示该用哪个解释器了。
+    """
     cfg = Path(__file__).resolve().parent / "config.py"
     try:
         text = cfg.read_text(encoding="utf-8")
     except OSError:
         return None
-    # config.py 的 MODEL_BASE 形如 E:\Code\stable-diffusion-webui\models,
-    # 据此推出同级 .venv。需要做一次转义还原: 文件里是 r"..." 原始字符串。
     import re
 
-    m = re.search(r'MODEL_BASE\s*=\s*Path\(r"([^"]+)"', text)
+    # 从 MODEL_BASE 的赋值处起, 取一个有界窗口, 窗口内找第一个 r"..." 字面量。
+    #
+    # 不要写成 `MODEL_BASE\s*=(.*?)\n\s*\w`: 非贪婪 + DOTALL 会在**第一个**
+    # 换行处就满足, 实际只抓到 ` Path(` 就断了(值在下一行), 静默返回 None。
+    # 有界窗口对代码怎么换行、对齐、加注释都免疫 —— 只要默认值字面量还在
+    # 这条语句附近就能读到。
+    m = re.search(r'MODEL_BASE\s*=', text)
     if not m:
         return None
-    webui = Path(m.group(1)).parent
+    window = text[m.end():m.end() + 500]
+    lit = re.search(r'r"([^"]+)"', window)
+    if not lit:
+        return None
+    webui = Path(lit.group(1)).parent
     exe = webui / ".venv" / "Scripts" / "python.exe"
     return str(exe) if exe.exists() else None
 

@@ -41,6 +41,12 @@ from pathlib import Path
 
 # 必须在 import torch 之前设好, 否则 HF 会往用户 AppData 写缓存
 _PROJECT = Path(__file__).resolve().parent.parent
+# 本文件以脚本方式启动(qwen_pipeline 用 QWEN_PYTHON + 本文件路径拉起),
+# 此时 sys.path[0] 是 backend/ 目录本身, `backend` 包不可见。
+# 下面要 import backend.config 取模型路径, 所以先把项目根加进去。
+# 用脚本方式启动是常态, 这里的 sys.path 修正是启动链路的一部分, 不是可选优化。
+if str(_PROJECT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT))
 _HF = _PROJECT / "backend" / "vendor" / "hf_cache"
 _HF.mkdir(parents=True, exist_ok=True)
 os.environ["HF_HOME"] = str(_HF)
@@ -63,14 +69,25 @@ if not os.environ.get("BIGHEAD_QWEN_AS_LIBRARY"):
 import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 
-MODEL_BASE = Path(r"E:\Code\stable-diffusion-webui\models")
-QWEN = MODEL_BASE / "qwen"
+from backend.config import (  # noqa: E402
+    QWEN_LORA_KOHYA,
+    QWEN_LORA_PEFT,
+    QWEN_MODEL_DIR,
+    QWEN_TRANSFORMER,
+)
+
 # 量化档: Q3_K_M。Q4_K_M 实测峰值 16.81G 已超过物理显存 15.89G,
 # 再挂 720 个 LoRA 层必然溢出 -> WDDM 换页 -> 647s/张;
 # Q3 把峰值压到 14.61G, 同样挂 LoRA 26.0s/张, 身份余弦只掉 0.0115。
-TRANSFORMER = QWEN / "transformer" / "qwen-image-edit-2511-Q3_K_M.gguf"
-LORA_KOHYA = QWEN / "lora" / "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
-CACHE = _PROJECT / "outputs" / "_cache" / "qwen_lightning4_peft.safetensors"
+#
+# 路径一律来自 backend.config, 不在此处另抄一份 —— 之前这里硬编码了
+# MODEL_BASE / QWEN / TRANSFORMER / LORA_KOHYA 四条, 与 config 各改各的,
+# 换机器时必漏。父进程拉起本 worker 时会继承 BIGHEAD_MODEL_BASE,
+# 所以覆盖能力对子进程同样成立。
+QWEN = QWEN_MODEL_DIR
+TRANSFORMER = QWEN_TRANSFORMER
+LORA_KOHYA = QWEN_LORA_KOHYA
+CACHE = QWEN_LORA_PEFT
 CACHE.parent.mkdir(parents=True, exist_ok=True)
 
 _pipe = None
