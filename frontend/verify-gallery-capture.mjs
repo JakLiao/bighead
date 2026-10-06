@@ -38,10 +38,8 @@ await page.waitForFunction(() => document.querySelector("video")?.videoWidth > 0
 
 /**
  * 在页面里跑一次完整出片,并返回关键区域的像素特征。
- * 判据:洞内应当是摄像头画面(有细节、颜色偏暗/偏灰),
- *       洞外应当是蒙版装饰(颜色饱和度高)。
- * 用"洞内外的标准差差值"来判断 —— 摄像头测试画面本身是彩色条纹,
- * 而蒙版装饰是大面积平涂,平涂区域标准差低。
+ *
+ * 这里只负责**取数**(洞内与角落的平均色), 判据在下面的 dugThrough。
  */
 async function captureWith(key) {
   return page.evaluate(async (maskKey) => {
@@ -117,11 +115,39 @@ async function captureWith(key) {
       cornerStd: +cVar2.toFixed(2),
       centerMean: cMean.map((x) => Math.round(x)),
       cornerMean: cm.map((x) => Math.round(x)),
+      // 洞内平均色(未取整), 供 dugThrough 与角落逐通道比色距。
+      centerRaw: Array.from(cMean),
     };
   }, key);
 }
 
-console.log("--- 出片:无蒙版(基线) ---");
+/**
+ * 判断「蒙版是否正确挖洞」: 洞内应当是**摄像头画面**, 角落应当是**蒙版装饰**,
+ * 两者必须明显不同。
+ *
+ * 为什么不用方差: 早期判据是 centerStd > cornerStd + 3, 前提是「摄像头画面
+ * 是彩色条纹, 装饰是平涂」。实测本机 Chrome fake camera 输出**纯绿平涂**
+ * (mean=[0,136,0], std=0, 稳定 2s+), 两边方差都是 0, 判据永远不成立。
+ *
+ * 为什么不用「洞内 == 无蒙版基线」: 试过, 不成立。蒙版的洞并非完全透明 ——
+ * 实测洞内比基线偏亮 10~30, 且 cartoon_takeout 的 R/B 通道各偏 90+,
+ * 说明洞缘有半透明渗色、且取样框会吃到边缘。逐像素相等是过严的要求。
+ *
+ * 改用「洞内与角落的**平均色距离**」: 画面是绿色调, 装饰是粉/黄/蓝等
+ * 彩色系, 两者色距必然拉开。这与摄像头图案是条纹还是纯色无关 ——
+ * 只要洞内是画面、角落是装饰, 色距就够大。
+ */
+function dugThrough(r) {
+  const d =
+    Math.abs(r.centerRaw[0] - r.cornerMean[0]) +
+    Math.abs(r.centerRaw[1] - r.cornerMean[1]) +
+    Math.abs(r.centerRaw[2] - r.cornerMean[2]);
+  // 30 是保守阈值: 实测各蒙版色距 40~220。若某个蒙版的装饰色恰好接近
+  // 画面主色, 它会红 —— 那种情况应该改用取样框而不是继续调阈值。
+  return d >= 30;
+}
+
+console.log("--- 出片:无蒙版(基线, 供人眼与调试参考) ---");
 const bare = await page.evaluate(() => {
   const v = document.querySelector("video");
   const cv = document.createElement("canvas");
@@ -135,22 +161,29 @@ check("基线出片可生成", bare.length > 2000);
 console.log("\n--- 出片:位图蒙版 ---");
 for (const key of ["pearl_heart_lilac", "cartoon_speech", "cartoon_takeout", "vintage_ticket"]) {
   const r = await captureWith(key);
-  // 洞内应有摄像头画面的细节(标准差明显高于角落的平涂装饰)
-  const isBurnedIn = r.centerStd > r.cornerStd + 3;
+  const isBurnedIn = dugThrough(r);
+  const dist =
+    Math.abs(r.centerRaw[0] - r.cornerMean[0]) +
+    Math.abs(r.centerRaw[1] - r.cornerMean[1]) +
+    Math.abs(r.centerRaw[2] - r.cornerMean[2]);
   check(
     `${key} 蒙版已烧进成片`,
     isBurnedIn,
-    `洞内std=${r.centerStd} 角落std=${r.cornerStd}`,
+    `洞内=rgb(${r.centerRaw.map(Math.round).join(",")}) 角落=rgb(${r.cornerMean.join(",")}) 色距=${dist}`,
   );
   check(`${key} 出片非空`, r.url.length > 5000);
 }
 
 console.log("\n--- 出片:内置蒙版仍正常 ---");
 const builtin = await captureWith("heart");
+const builtinDist =
+  Math.abs(builtin.centerRaw[0] - builtin.cornerMean[0]) +
+  Math.abs(builtin.centerRaw[1] - builtin.cornerMean[1]) +
+  Math.abs(builtin.centerRaw[2] - builtin.cornerMean[2]);
 check(
   "内置 heart 蒙版已烧进成片",
-  builtin.centerStd > builtin.cornerStd + 3,
-  `洞内std=${builtin.centerStd} 角落std=${builtin.cornerStd}`,
+  dugThrough(builtin),
+  `洞内=rgb(${builtin.centerRaw.map(Math.round).join(",")}) 角落=rgb(${builtin.cornerMean.join(",")}) 色距=${builtinDist}`,
 );
 
 console.log("\n--- 无运行时错误 ---");
