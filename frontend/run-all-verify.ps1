@@ -15,7 +15,9 @@ $scripts = @(
   "verify-album-edit.mjs",
   "verify-retake-bar.mjs",
   "verify-share-card.mjs",
-  "verify-album-search.mjs"
+  "verify-album-search.mjs",
+  "verify-decorate-persist.mjs",
+  "verify-reduced-motion.mjs"
 )
 $totalPass = 0
 $totalFail = 0

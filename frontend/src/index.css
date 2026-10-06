@@ -67,3 +67,24 @@ select:focus-visible {
 .animate-pose-in {
   animation: pose-in 320ms ease-out both;
 }
+
+/*
+ * 动画降级。
+ *
+ * 一次性覆盖全部动画类, 而不是逐个加 @media 包裹 —— 逐个包裹的漏改成本
+ * 高(新加一个动画类就会忘), 而这里只需保证新类名落在这个选择器下。
+ *
+ * 降级策略是「去掉动画、保留终态」而不是 display:none: 倒计时数字
+ * (.countdown-num) 与 pose 提示都靠动画结束后的 opacity:1 呈现, 直接隐藏
+ * 会让用户彻底看不到倒计时。animation: none 之后元素保持 CSS 声明的
+ * 静态样式, 对这两类就是可见的终态。
+ *
+ * shutter-flash 落在 body 上, 同样需要: 前庭功能障碍者对全屏闪烁敏感。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .shutter-flash,
+  .countdown-num,
+  .animate-pose-in {
+    animation: none;
+  }
+}

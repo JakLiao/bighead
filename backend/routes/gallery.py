@@ -35,6 +35,9 @@ _JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,63}$")
 # GET 之间会出现「读到中间态」的可能。单机自用, 不需要跨进程。
 _album_lock = Lock()
 
+# .broken-* 备份保留几个。3 个覆盖「最近手滑弄坏了几次」, 再多就只是垃圾。
+_BROKEN_KEEP = 3
+
 
 # ---------------------------------------------------------------------------
 # 私有助手(被 verify_album_meta.py 与路由共享)
@@ -72,11 +75,42 @@ def _load_album(outdir: Path) -> dict:
 
 
 def _save_album(outdir: Path, album: dict) -> None:
-    """原子写: 写 .tmp 再 os.replace。读端不需要看到中间态。"""
+    """原子写: 写 .tmp 再 os.replace。读端不需要看到中间态。
+
+    元数据全空时删掉 _album.json 而不是写 `{}`: 空文件与「文件不存在」
+    对读端是同一含义, 留着只会让人误以为「还有元数据, 只是恰好都是空的」。
+    顺带清掉历史遗留的 .broken-* 备份 —— 那些是 _load_album 出错时留的,
+    用户手工恢复完就没用了, 每次写盘都留着会一直堆积。
+    """
     p = _album_path(outdir)
+    if not album:
+        p.unlink(missing_ok=True)
+        _prune_broken_backups(outdir)
+        return
     tmp = p.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(album, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, p)
+    _prune_broken_backups(outdir)
+
+
+def _prune_broken_backups(outdir: Path) -> None:
+    """删除 _album.json.broken-* 备份。
+
+    保留策略: 只留最近 3 个。这些文件的唯一用途是「元数据被误改坏时手工
+    恢复」, 恢复完就是垃圾; 删干净会让用户以为数据无处可查, 无限保留
+    又会让 outputs/ 越用越乱。3 个足够覆盖「最近手滑弄坏了几次」。
+    """
+    backups = sorted(
+        outdir.glob(f"{ALBUM_FILENAME}.broken-*"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    for old in backups[_BROKEN_KEEP:]:
+        try:
+            old.unlink()
+        except OSError:
+            # 清理是尽力而为, 失败不影响主流程(用户可能正打开着它)
+            pass
 
 
 def _normalize_entry(patch: dict) -> dict:
