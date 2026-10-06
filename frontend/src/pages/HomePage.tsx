@@ -236,7 +236,7 @@ export function HomePage() {
           maskPreview={maskPreview}
           showGuides={showGuides}
         />
-        <CountdownOverlay tick={snapTick} onComplete={doSnap} />
+        <CountdownOverlay key={snapTick} tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
         <PoseHint
           pose={POSES[frames.length % POSES.length]}

@@ -185,6 +185,7 @@ export function GalleryPage() {
 
       {editing && (
         <AlbumEditor
+          key={editing.job_id}
           jobId={editing.job_id}
           initial={{
             title: editing.title,

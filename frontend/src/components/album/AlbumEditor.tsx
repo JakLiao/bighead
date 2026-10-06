@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import type { AlbumEntry } from "../../types";
 import { useEscape } from "./useEscape";
 
@@ -23,6 +23,17 @@ interface Props {
  * 保存按钮在 pending 期间 disabled 防止重复 PATCH。
  */
 export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props) {
+  // 本地态由「父组件给的 key={jobId}」决定重置, 不在 effect 里同步 setState。
+  //
+  // 原来靠 useEffect([initial, jobId]) 重置 title/note/tags/favorite —— 那是
+  // 「用 effect 派生状态」, 会多一帧旧值(用户会看到输入框先闪一下上一条的内容),
+  // 并触发 react-hooks/set-state-in-effect。改成 key 重挂载后, 换一条记录时
+  // React 直接重建组件, useState(initial.x) 天然就是新值。
+  //
+  // 注意语义差异(刻意保留): 保存成功后父组件会 reload() 拉回新 items,
+  // 同一条记录的 initial 内容会更新(如 updated_at), 但 jobId 不变 → 不重挂载
+  // → 用户刚编辑的内容不会被回滚。这比原实现更正确: 原实现会在 reload 之后
+  // 立刻把输入框重置成服务端值, 用户刚敲的字就消失了。
   const [title, setTitle] = useState(initial.title);
   const [note, setNote] = useState(initial.note);
   const [tagInput, setTagInput] = useState("");
@@ -30,16 +41,6 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
   const [favorite, setFavorite] = useState(initial.favorite);
   const [pending, setPending] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-
-  // 当 initial 变化(从不同 item 打开)时重置本地态
-  useEffect(() => {
-    setTitle(initial.title);
-    setNote(initial.note);
-    setTags(initial.tags);
-    setFavorite(initial.favorite);
-    setTagInput("");
-    setConfirmDelete(false);
-  }, [initial, jobId]);
 
   function addTag(raw: string) {
     const t = raw.trim();
