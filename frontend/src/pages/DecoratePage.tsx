@@ -470,8 +470,10 @@ export function DecoratePage() {
             const lr = await fetch(`/outputs/${jobId}/layout.jpg`);
             if (lr.ok) {
               const card = await renderShareCard(await lr.blob(), jobId);
-              const saved = await saveShareCard(jobId, card);
-              setShareUrl(saved.share_url);
+              if (card) {
+                const saved = await saveShareCard(jobId, card);
+                setShareUrl(saved.share_url);
+              }
             }
           } catch {
             // 分享卡失败不该影响 AI 成片的展示 —— 拼图已经能看了。
@@ -496,8 +498,10 @@ export function DecoratePage() {
         setLayoutUrl(`/outputs/${jobId}/layout.jpg`);
         try {
           const card = await renderShareCard(result, jobId);
-          const saved = await saveShareCard(jobId, card);
-          setShareUrl(saved.share_url);
+          if (card) {
+            const saved = await saveShareCard(jobId, card);
+            setShareUrl(saved.share_url);
+          }
         } catch {
           // 同上: 分享卡失败不阻断出片
         }
@@ -695,9 +699,16 @@ export function DecoratePage() {
       setProgress({ current: 2, total: 3, msg: "正在生成拼图..." });
       const result = await makeLayoutToJob(finalBlobs, cap.job_id, layout, frameOverride);
       setProgress({ current: 3, total: 3, msg: "正在生成分享卡..." });
-      const shareBlob = await renderShareCard(result, cap.job_id);
-      const saved = await saveShareCard(cap.job_id, shareBlob);
-      setShareUrl(saved.share_url);
+      // 分享卡是**可选产物**: 合成失败只意味着这一轮没有卡, 拼图本身
+      // 已经落盘可用。所以吞掉失败、不阻断出片 —— 但必须让 setShareUrl
+      // 保持 null, 这样界面不会出现一个内容其实是原始拼图的假分享卡。
+      const shareBlob = await renderShareCard(result, cap.job_id).catch(() => null);
+      if (shareBlob) {
+        const saved = await saveShareCard(cap.job_id, shareBlob);
+        setShareUrl(saved.share_url);
+      } else {
+        console.warn("[decorate] 分享卡合成失败, 本轮只落盘拼图");
+      }
 
       // 换成**服务端路径**而不是 blob: —— 刷新页面后依然可看, 且能被分享。
       // blob: URL 每次会话都不一样, 贴纸册/历史记录里存它等于存了个死链。

@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
 
@@ -40,6 +41,8 @@ from .config import (
     SHARE_FILENAME,
 )
 
+log = logging.getLogger(__name__)
+
 # footer 文字配色
 _INK_BRAND = (90, 70, 70)
 _INK_META = (150, 120, 118)
@@ -50,7 +53,7 @@ _META_SIZE = 30
 
 
 def _load_font(size: int) -> ImageFont.FreeTypeFont | None:
-    """按候选链取第一个能用的字体, 全都不存在时返回 None。
+    """按候选链取第一个能用的字体, 全都不存在时返回 None 并 warn 一次。
 
     刻意不设「候选链全挂 -> load_default()」兜底: PIL 的
     ImageFont.load_default() 返回的是位图字体, 字形极小且**不含中文**,
@@ -58,12 +61,21 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont | None:
     看起来排好版、实际全是豆腐块的图。
 
     仍然兜 arial.ttf: 它至少能让纯 ASCII 的 job_id 正常显示。
+
+    **为什么必须 warn**: 全部字体缺失时, render_share_card 仍会输出一张
+    尺寸完全正确的 4:3 卡片, 只是 footer 空白。没有这条日志, 那种卡片
+    会被当成生成成功 —— 它确实「成功」了, 只是没有文字, 而这一层退化在
+    生产上几乎不可能被肉眼发现(每张卡都缺 footer, 除非有人专门去看)。
     """
     for path in SHARE_CARD_FONTS + [SHARE_CARD_FONT_FALLBACK]:
         try:
             return ImageFont.truetype(path, size)
         except OSError:
             continue
+    log.warning(
+        "分享卡字体全部缺失, footer 将不渲染文字。已试: %s",
+        ", ".join(SHARE_CARD_FONTS + [SHARE_CARD_FONT_FALLBACK]),
+    )
     return None
 
 

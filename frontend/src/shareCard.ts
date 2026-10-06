@@ -31,7 +31,7 @@ export function shortJobId(jobId: string): string {
 export async function renderShareCard(
   collage: Blob,
   jobId: string,
-): Promise<Blob> {
+): Promise<Blob | null> {
   const bmp = await createImageBitmap(collage);
   // ImageBitmap 是**显式**管理的资源: 不调 close() 不会进 GC 的自动回收
   // 路径, 解码后的像素会一直挂在内存里。一次失败就泄漏一份, 连拍重来
@@ -42,8 +42,14 @@ export async function renderShareCard(
     card.width = SHARE_CARD_W;
     card.height = SHARE_CARD_H;
     const ctx = card.getContext("2d");
-    // getContext 失败不该让用户丢掉整轮照片, 回落原拼图。
-    if (!ctx) return collage;
+    // getContext 失败不该让用户丢掉整轮照片 —— 但也不能静默: 返回 null
+    // 让调用方明确知道「这一轮没有分享卡」, 而不是拿到一个内容其实
+    // 是原始拼图的「分享卡」(那种卡看起来完全正常, 只是没有 4:3 卡框
+    // 和 footer, 会被当成生成成功)。
+    if (!ctx) {
+      console.warn("[shareCard] 2d context 不可用, 跳过分享卡");
+      return null;
+    }
 
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, SHARE_CARD_W, SHARE_CARD_H);
@@ -87,11 +93,13 @@ export async function renderShareCard(
     ctx.fillText(meta, SHARE_CARD_W - MARGIN, lineY + 130);
     ctx.textAlign = "left";
 
-    // toBlob 在 canvas tainted 或尺寸超限时给 null, 回落原拼图而不是抛错
-    // —— 分享卡合成失败不该让用户丢掉整轮照片。
+    // toBlob 在 canvas tainted 或尺寸超限时给 null。返回 null 而非回落
+    // collage: 回落会得到一张「内容是原始拼图、但文件名叫 share.jpg」的
+    // 东西 —— 它看起来正常, 却缺了卡框与 footer, 属于静默的错误产物。
+    // 显式 null 让调用方跳过落盘, 界面上不出现分享卡区块。
     return await new Promise<Blob | null>((r) =>
       card.toBlob(r, "image/jpeg", 0.92),
-    ) ?? collage;
+    );
   } finally {
     bmp.close();
   }
