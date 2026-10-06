@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Response
@@ -54,7 +55,21 @@ def layout_make(
         job_dir = _resolve_job_id_or_404(job_id)
         from ..config import LAYOUT_FILENAME
 
-        (job_dir / LAYOUT_FILENAME).write_bytes(data)
+        # 写临时文件再 os.replace, 而不是直接 write_bytes。
+        #
+        # 顶层 layout.jpg 可能是 ai/{style}/layout.jpg 的**硬链接**
+        # (见 pipeline._mirror_layout_to_top)。硬链接是一个 inode 两个名字,
+        # 而 write_bytes 是 open(O_TRUNC) —— 直接写会把**两个名字一起截断**,
+        # 连带把 AI 拼图的内容也清掉。同一 job 先跑 AI 写真再补一次普通拼图
+        # 就会踩到, 且 gallery 缩略图仍指向顶层, 表面看不出异常。
+        #
+        # os.replace 是 rename 语义: 新数据写进独立 inode, 再原子换名。
+        # 换名只动顶层那个名字, 硬链接指向的 AI 拼图分毫不动。
+        # 临时文件与目标同目录, 保证 replace 不跨卷(跨卷会失败)。
+        target = job_dir / LAYOUT_FILENAME
+        tmp = job_dir / f".{LAYOUT_FILENAME}.tmp"
+        tmp.write_bytes(data)
+        os.replace(tmp, target)
 
     return Response(content=data, media_type="image/jpeg")
 

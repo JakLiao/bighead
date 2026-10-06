@@ -34,6 +34,7 @@ from .config import (
     SDXL_CFG,
     SDXL_SIZE,
     SDXL_STEPS,
+    WEBUI_ROOT,
 )
 from .face import extract_face
 from . import ws
@@ -117,7 +118,8 @@ class BigHeadPipeline:
 
         # 走 webui 的 sd_xl_base.yaml + 单文件 UNet/VAE 完全本地化加载
         # original_config 必须是 yaml 路径,fetch_original_config 内部会 yaml.safe_load
-        sd_xl_yaml = Path(r"E:\Code\stable-diffusion-webui\repositories\generative-models\configs\inference\sd_xl_base.yaml")
+        # 路径来自 config.WEBUI_ROOT(原先在此又硬编码了一遍 webui 根目录)
+        sd_xl_yaml = WEBUI_ROOT / "repositories" / "generative-models" / "configs" / "inference" / "sd_xl_base.yaml"
         if not sd_xl_yaml.exists():
             raise FileNotFoundError(f"sd_xl_base.yaml not found: {sd_xl_yaml}")
 
@@ -809,22 +811,34 @@ def build_ai_layout(image_paths: list[str], out_dir: Path) -> str | None:
 
 
 def _mirror_layout_to_top(out: Path) -> None:
-    """把 ai/{style}/layout.jpg 复制一份到 job 目录顶层。
+    """把 ai/{style}/layout.jpg 暴露到 job 目录顶层。
 
     gallery.py 只探测 outputs/{job_id}/layout.jpg, **不递归**进 ai/。
-    不写这份顶层副本, AI 拼图在贴纸册里就永远只显示 4 张单图缩略图,
+    不写这份顶层入口, AI 拼图在贴纸册里就永远只显示 4 张单图缩略图,
     那张拼图本身从不出现 —— 而它恰恰是这一轮最该被看到的东西。
 
-    失败只 warn 不抛: 这是一份冗余副本, 写不出来不影响 AI 成片本身,
-    也不该让整条 build_ai_layout 走进 except 分支返回 None。
+    用**硬链接**而不是拷贝: 两条路径指向同一份数据, 磁盘只占 1 份而不是 2 份。
+    每轮 1-2MB, 累积起来是纯浪费。硬链接对读方完全透明 —— Pillow 正常打开,
+    gallery 的 stat/探测也照常成立。
+
+    降级: 硬链接失败(跨卷、目标已存在等)退回拷贝, 宁可占双份也不能让贴纸册里
+    看不到这一轮拼图。拷贝也失败只 warn 不抛: 这是一份冗余副本, 写不出来不影响
+    AI 成片本身, 也不该让整条 build_ai_layout 走进 except 分支返回 None。
     """
     try:
         top = out.parent.parent.parent / LAYOUT_FILENAME
         if top == out:
             return
-        shutil.copyfile(out, top)
+        # 上一轮遗留的拷贝会挡住 os.link(目标已存在), 先移除再链。
+        if top.exists():
+            top.unlink()
+        try:
+            os.link(out, top)
+        except OSError:
+            log.debug("硬链接失败, 退回拷贝: %s", LAYOUT_FILENAME, exc_info=True)
+            shutil.copyfile(out, top)
     except (OSError, NameError):
-        log.warning("复制顶层 %s 失败, 贴纸册将只显示单图", LAYOUT_FILENAME, exc_info=True)
+        log.warning("暴露顶层 %s 失败, 贴纸册将只显示单图", LAYOUT_FILENAME, exc_info=True)
 
 
 def _clip_vision_path() -> Path:

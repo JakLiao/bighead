@@ -61,8 +61,16 @@ ALBUM_MAX_NOTE = 280      # 备注字节数上限
 ALBUM_MAX_TAG = 16        # 单标签字节数上限
 ALBUM_MAX_TAGS = 8        # 标签数量上限
 
-# 复用 webui 的模型仓库(用户指定)
-MODEL_BASE = Path(r"E:\Code\stable-diffusion-webui\models")
+# 复用 webui 的模型仓库(用户指定)。
+# 支持 BIGHEAD_MODEL_BASE 覆盖: 换机器 / 换盘时不必改代码。
+# 之前这个字面路径散落在 config / qwen_worker / pipeline 三处, 改一处漏两处,
+# 且 scripts/ 下还有 11 个一次性脚本各自抄了一份。
+MODEL_BASE = Path(
+    os.environ.get("BIGHEAD_MODEL_BASE", r"E:\Code\stable-diffusion-webui\models")
+)
+# webui 仓库根(不是 models/)。SDXL 的 original_config yaml 在它下面,
+# 以前是 pipeline.py 里又写了一遍字面路径。
+WEBUI_ROOT = MODEL_BASE.parent
 
 # SDXL 路线(AI 写真默认)
 SDXL_CKPT = MODEL_BASE / "checkpoints" / "人像-XL-asian aesthetics（亚洲美学XL）_v2.0.safetensors"
