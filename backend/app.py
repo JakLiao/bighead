@@ -78,6 +78,19 @@ async def _startup():
 
     _preflight()
 
+    # 回收站过期清理。
+    #
+    # gallery.py 里的 _purge_expired() 在**每次**读回收站时也会顺带做, 所以这里
+    # 不是功能所必需 —— 它解决的是"服务一直不重启, 又从不打开回收站"这个场景:
+    # 那时过期条目会一直占着磁盘, 而用户完全看不到它们存在。
+    # 启动时清一次, 至少保证"关了很久再开机"不会越攒越多。
+    from .routes.gallery import purge_expired_on_startup
+
+    purged = purge_expired_on_startup()
+    if purged:
+        print(f"  回收站: 清理了 {len(purged)} 条过保留期的条目")
+    print("=" * 60)
+
     if AI_BACKEND == "qwen":
         # Qwen 必须提前预热: 模型加载 75s + 首次 CUDA kernel 懒加载 145s
         # ≈ 3.5 分钟。不预热的话第一个用户请求要独吞这份开销, 表现为
