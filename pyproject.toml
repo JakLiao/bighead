@@ -1,3 +1,16 @@
+# 包元数据 —— 许可与作者信息。
+# 声明 dual license 时用 PEP 639 的 SPDX 表达式 `Apache-2.0 OR LicenseRef-...`。
+# LicenseRef-Commercial 指本仓库的 COMMERCIAL-LICENSE.md(闭源付费授权),
+# 它不是 OSI 认可的 SPDX 标准标识,必须带 `LicenseRef-` 前缀,否则校验工具报错。
+[project]
+name = "bighead"
+version = "0.1.0"
+description = "本地大头贴应用:实时滤镜 + 连拍拼图 + AI 复古写真"
+license = "Apache-2.0 OR LicenseRef-BigHead-Commercial"
+license-files = ["LICENSE", "NOTICE", "THIRD-PARTY-NOTICES.md", "COMMERCIAL-LICENSE.md"]
+authors = [{ name = "JulianLiao" }]
+requires-python = ">=3.10"
+
 # Ruff 配置 —— 与 tsc -b 同级的前端/后端静态检查。
 #
 # 之前项目零 lint, 审查文档里列出的多数问题(未用变量、未定义名、导入顺序)

@@ -33,7 +33,14 @@ from pathlib import Path
 
 import requests
 
-DEST = Path(r"E:\Code\stable-diffusion-webui\models\qwen")
+_MODELS = Path(os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models"))
+if "<WEBUI_ROOT>" in str(_MODELS):
+    raise SystemExit(
+        "请先设 BIGHEAD_MODEL_BASE 指向 Stable Diffusion WebUI 的 models 目录, "
+        "例如:\n"
+        '  $env:BIGHEAD_MODEL_BASE="D:\\path\\to\\stable-diffusion-webui\\models"'
+    )
+DEST = _MODELS / "qwen"
 TIMEOUT = 30
 CHUNK = 1024 * 1024 * 8  # 8MB
 

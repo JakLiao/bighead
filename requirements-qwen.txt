@@ -1,6 +1,6 @@
 # Qwen-Image-Edit 独立环境依赖(2026-10-03)
 #
-# 为什么不复用 E:\Code\stable-diffusion-webui\.venv:
+# 为什么不复用 <WEBUI_ROOT>\.venv:
 # Qwen-Image-Edit 需要 diffusers>=0.36 / transformers>=4.51,
 # 而 SDXL 那套环境锁在 diffusers 0.34 + transformers 4.37.2,
 # 升级会打破 PEFT 本地补丁和 EncoderDecoderCache 兼容层。

@@ -7,7 +7,7 @@
   4. 检不到脸时返回 None(退回居中裁切)
 
 这个脚本需要 insightface, 所以要用 webui 的解释器跑
-(E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe)。
+(<WEBUI_ROOT>\.venv\Scripts\python.exe)。
 
 用法: <webui python> scripts/_test_face_crop.py
 """

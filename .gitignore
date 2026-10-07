@@ -1,3 +1,9 @@
+# TRAE 本地工作区(规则 / 计划文档)。不入库的两个原因:
+#   1. 里面写死了本机绝对路径(解释器、模型目录), 公开仓库里无意义且泄露目录布局;
+#   2. 它是给 agent 看的本地规则, 不是产品代码, clone 的人用不上。
+# 删除只影响 git 索引, 本地文件照常保留。
+.trae/
+
 # 输出产物
 outputs/
 # 一次性诊断/基准脚本的输出日志(含本机绝对路径与大量冗余 stdout, 不入库;
@@ -42,7 +48,7 @@ venv/
 .cuda_cache/
 
 # Qwen-Image-Edit 专用虚拟环境。
-# 与 SDXL 那套(在 E:\Code\stable-diffusion-webui\.venv)彻底隔离,因为
+# 与 SDXL 那套(在 <WEBUI_ROOT>\.venv)彻底隔离,因为
 # diffusers 0.40 强制 transformers 5.x + huggingface-hub 1.x,而 SDXL 需要
 # transformers 4.37.2。两者不能共存于同一环境。
 # 版本组合见 requirements-qwen.txt,可用 pip -r 重建,不入库。

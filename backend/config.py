@@ -65,8 +65,13 @@ ALBUM_MAX_TAGS = 8        # 标签数量上限
 # 支持 BIGHEAD_MODEL_BASE 覆盖: 换机器 / 换盘时不必改代码。
 # 之前这个字面路径散落在 config / qwen_worker / pipeline 三处, 改一处漏两处,
 # 且 scripts/ 下还有 11 个一次性脚本各自抄了一份。
+#
+# 默认值是占位符而非某台机器的真实路径: 本仓库是公开的, 把作者本机的
+# 盘符写死在这里既无意义又会泄露目录布局。部署时二选一:
+#   1. 设环境变量 BIGHEAD_MODEL_BASE 指向你的 models 目录(推荐)
+#   2. 直接改下面这个默认值
 MODEL_BASE = Path(
-    os.environ.get("BIGHEAD_MODEL_BASE", r"E:\Code\stable-diffusion-webui\models")
+    os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models")
 )
 # webui 仓库根(不是 models/)。SDXL 的 original_config yaml 在它下面,
 # 以前是 pipeline.py 里又写了一遍字面路径。

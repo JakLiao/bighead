@@ -304,7 +304,7 @@ if __name__ == "__main__":
 ### Step 1.6: 跑通
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m backend.share_card
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m backend.share_card
 ```
 
 期望输出 `OK outputs\_share_selftest\share.jpg (1200, 900)`。**必须确认尺寸是 1200×900 而不是别的** —— 这是整个 P2 唯一的硬几何断言。
@@ -434,7 +434,7 @@ app.include_router(share.router)
 
 ```powershell
 ruff check backend scripts
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m compileall -q backend scripts
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m compileall -q backend scripts
 ```
 
 ---
@@ -572,7 +572,7 @@ def _same_content(a: dict, b: dict) -> bool:
 - job_id 路径穿越（`../`）被 `_resolve_job_dir` 拒绝
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_share_card.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend\scripts\verify_share_card.py
 ```
 
 ---
@@ -948,7 +948,7 @@ export function useEscape(onEscape: () => void, active = true) {
 先起后端（**必须先做依赖预检**）：
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -c "import sys; from backend.peft_compat import ensure_peft; import insightface, onnxruntime, diffusers, transformers, torch, fastapi, uvicorn; assert ensure_peft(), 'peft still broken'; print('PY=', sys.executable); print('OK')"
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -c "import sys; from backend.peft_compat import ensure_peft; import insightface, onnxruntime, diffusers, transformers, torch, fastapi, uvicorn; assert ensure_peft(), 'peft still broken'; print('PY=', sys.executable); print('OK')"
 ```
 
 输出 `PY=` + `OK` 后再起后端 8077 与前端 5173，然后：
@@ -965,8 +965,8 @@ node run-all-verify.ps1
 ```powershell
 # 后端
 ruff check backend scripts
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m compileall -q backend scripts
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_share_card.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m compileall -q backend scripts
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend\scripts\verify_share_card.py
 
 # 前端
 cd frontend

@@ -14,10 +14,19 @@ transformer/config.json 是必需的(不是可选)。
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-D = Path(r"E:\Code\stable-diffusion-webui\models\qwen")
+# 模型目录与后端 config.py 同源(共用 BIGHEAD_MODEL_BASE), 避免两处各写一份。
+_D = Path(os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models"))
+if "<WEBUI_ROOT>" in str(_D):
+    raise SystemExit(
+        "请先设 BIGHEAD_MODEL_BASE 指向 Stable Diffusion WebUI 的 models 目录, "
+        "例如:\n"
+        '  $env:BIGHEAD_MODEL_BASE="D:\\path\\to\\stable-diffusion-webui\\models"'
+    )
+D = _D / "qwen"
 GGUF = D / "transformer" / "qwen-image-edit-2511-Q4_K_M.gguf"
 CFG = D / "transformer" / "config.json"
 

@@ -30,7 +30,10 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-D = Path(r"E:\Code\stable-diffusion-webui\models\qwen")
+_MODELS = Path(os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models"))
+if "<WEBUI_ROOT>" in str(_MODELS):
+    raise SystemExit("请先设 BIGHEAD_MODEL_BASE 指向 webui 的 models 目录")
+D = _MODELS / "qwen"
 OUT = ROOT / "outputs" / "_verify" / "qwen"
 OUT.mkdir(parents=True, exist_ok=True)
 SRC = ROOT / "outputs" / "1a0b12477d66" / "photo_2.jpg"

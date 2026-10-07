@@ -1,7 +1,7 @@
 """端到端联调:走真实 HTTP(uvicorn + vite proxy),而不是 TestClient.
 
 前置:
-  终端 1: E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
+  终端 1: <WEBUI_ROOT>\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
   终端 2: npm run dev            (vite 5173)
 本脚本只做客户端,不自己起服务.
 """

@@ -237,8 +237,8 @@ async def layout_make(images: list[bytes] = File(...), ...):
 
 同一份模型路径在**两处**各自硬编码，且都没走 `config.py`：
 
-- `backend/qwen_worker.py:66` — `MODEL_BASE = Path(r"E:\Code\stable-diffusion-webui\models")`
-- `backend/pipeline.py:123` — `sd_xl_yaml = Path(r"E:\Code\...\configs\inference\sd_xl_base.yaml")`
+- `backend/qwen_worker.py:66` — `MODEL_BASE = Path(r"<WEBUI_ROOT>\models")`
+- `backend/pipeline.py:123` — `sd_xl_yaml = Path(r"<WEBUI_ROOT>\configs\inference\sd_xl_base.yaml")`
 
 换机器/换用户即失效。`backend/config.py` 已经存在并管理了 `QWEN_WORKER`、`SDXL_CKPT` 等，
 这两个路径应统一收敛到 config（用环境变量 + 默认值）。
@@ -680,7 +680,7 @@ eslint 上线时报出 7 个 error，其中 **3 个是本次修复过程中新�
 
 以下未在本轮处理，均为低优先级或需产品决策：
 
-- `S2-3` 硬编码模型路径（`E:\Code\...`）应收敛到 `config.py`
+- `S2-3` 硬编码模型路径（`<WEBUI_ROOT>`）应收敛到 `config.py`
 - `S2-10` 服务绑 `0.0.0.0` 且无鉴权 —— 需明确「仅限可信局域网」或加认证
 - `L-10` 多处 `key={i}` 索引作 key（数据无增删时可接受，暂不改）
 
@@ -883,7 +883,7 @@ venv 无 pytest，故 `backend/scripts/verify_era.py` 用裸 `assert` + `TestCli
 ## 5. 门禁结果
 
 ```
-依赖预检  PY= E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe + OK
+依赖预检  PY= <WEBUI_ROOT>\.venv\Scripts\python.exe + OK
 ruff check backend scripts                → All checks passed!
 compileall -q backend scripts              → exit 0
 verify_era.py                              → 46 passed, 0 failed (exit 0)
@@ -1157,7 +1157,7 @@ stickers 合成那一颗的当前帧，**pointerup 时才一次性 `onChange` �
 ## 1. 依赖预检
 
 ```
-PY= E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe
+PY= <WEBUI_ROOT>\.venv\Scripts\python.exe
 OK
 ```
 

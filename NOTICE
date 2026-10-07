@@ -1,0 +1,75 @@
+BigHead · 大头贴复古
+Copyright 2026 JulianLiao
+
+本产品采用双重许可(double licensing)模式：
+
+1. 开源许可 —— Apache License, Version 2.0(全文见同目录 LICENSE 文件)
+2. 商业授权 —— 不公开源码的商业客户适用,条款见 COMMERCIAL-LICENSE.md
+
+任何人可任选其一。若选择 Apache-2.0,则无需通知作者,亦无任何使用限制。
+
+------------------------------------------------------------------------
+本项目源码基于以下第三方作品
+------------------------------------------------------------------------
+
+backend/vendor/ip_adapter/
+------------------------------------------------------------------------
+IP-Adapter
+  Copyright 2023 Tencent Hunyuan Team
+  https://github.com/tencent-ailab/IP-Adapter
+  Licensed under the Apache License, Version 2.0
+  论文: arXiv:2308.06721 (Ye Hu, Zhang Jun, Liu Sibo, Han Xiao, Yang Wei)
+
+  本目录为上游实现(含 FaceID / FaceID Plus / FaceID PlusV2 分支)的
+  拷贝与最小适配,用于本项目的 SDXL 路线。上游以 Apache-2.0 发布,
+  与本项目所选许可一致,因此可合法纳入本仓库并由本项目统一分发。
+  Apache-2.0 §4(a)(c) 要求保留版权与归属声明,故在此集中列明;
+  上游文件内未附版权头,详见 THIRD-PARTY-NOTICES.md 的说明。
+
+  另:本目录内部分文件的实现还追溯自以下上游 ——
+  (逐个核实许可后填写,不要照抄目录级 LICENSE 的结论)
+
+  - diffusers (HuggingFace) —— Apache-2.0
+    https://github.com/huggingface/diffusers
+    见 attention_processor.py / attention_processor_faceid.py 文件头
+  - open_flamingo (mlfoundations) —— MIT
+    Copyright (c) 2023 Anas Awadalla, Irena Gao, Joshua Gardner,
+    Jack Hessel, Yusuf Hanafy, Wanrong Zhu, Kalyani Marathe,
+    Yonatan Bitton, Samir Gadre, Jenia Jitsev, Simon Kornblith,
+    Pang Wei Koh, Gabriel Ilharco, Mitchell Wortsman, Ludwig Schmidt
+    https://github.com/mlfoundations/open_flamingo
+    见 resampler.py 文件头
+  - imagen-pytorch (lucidrains) —— MIT
+    Copyright (c) 2022 Phil Wang
+    https://github.com/lucidrains/imagen-pytorch
+    见 resampler.py 文件头
+
+  这三个上游的许可彼此不同,不能只看 IP-Adapter 目录的 LICENSE 就推断
+  全部代码都归到 Apache-2.0 —— resampler.py 抄自 MIT 上游,
+  MIT 与 Apache-2.0 均要求保留原始版权声明,故在此逐条列明。
+
+------------------------------------------------------------------------
+本项目使用的模型权重不在本仓库内,且不受 Apache-2.0 覆盖
+------------------------------------------------------------------------
+仓库只含源码。下列权重由使用者自行从各自分发渠道获取,存放于
+MODEL_BASE(见 backend/config.py),其许可**由各自权利人单独约定**,
+与本项目的 Apache-2.0 / 商业授权无关,且多为**限制性或非商业**条款。
+使用本项目不构成对任何权重许可的授权;若要将本项目用于商业场景,
+必须先行逐一确认下列权重的许可是否允许商业用途。
+
+  - SDXL 底模及社区微调权重(如 人像-XL-asian aesthetics 系列)
+  - IP-Adapter FaceID Plus v2 权重(.bin / LoRA)
+  - FilmGrainRedmond、LEOSAM's FilmGirl(VELVIA)等胶片 LoRA
+  - Qwen-Image-Edit-2511 及其 Lightning LoRA
+  - CLIP-ViT-H-14 (laion2B-s32B-b79K)
+  - InsightFace 预训练模型(buffalo_l 等)
+  - Realistic Vision V5.0
+
+**特别注意 InsightFace**:其**代码**为 MIT 许可(可商用),但官方发布的
+**预训练模型权重**附带独立的仅限非商业研究用途条款。代码许可与权重
+许可是两件事,不可混为一谈 —— 本项目以 InsightFace 做人脸检测与
+身份度量,该调用依赖其权重,商业化前必须单独取得授权或替换为
+许可兼容的检测方案。
+
+同理,人脸数据本身属生物识别特征,受各地隐私法规(如 GDPR、
+个人信息保护法)约束,采集与商用需另行满足合规义务,本许可不涉及。

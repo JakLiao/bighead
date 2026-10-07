@@ -161,7 +161,7 @@ sys.exit(0 if not FAIL else 1)
 ### Step 1.3: 跑测试确认红 → 绿
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend/scripts/verify_album_meta.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend/scripts/verify_album_meta.py
 ```
 
 预期：先全 FAIL（`ImportError: cannot import name '_album_path'`），因为下面 Step 1.4 才落地实现。
@@ -372,7 +372,7 @@ def gallery_delete(job_id: str):
 ### Step 1.5: 跑自测确认红 → 绿
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend/scripts/verify_album_meta.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend/scripts/verify_album_meta.py
 ```
 
 预期：`Result: N passed, 0 failed`（约 20 项断言）。
@@ -384,7 +384,7 @@ def gallery_delete(job_id: str):
 ```powershell
 cd f:\Trae-work\bighead
 ruff check backend
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m compileall -q backend
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m compileall -q backend
 ```
 
 预期：无报错。
@@ -1343,7 +1343,7 @@ process.exit(FAIL.length ? 1 : 0);
 
 ```powershell
 # 启动后端 (新 terminal)
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 
 # 启动前端 (新 terminal)
 cd f:\Trae-work\bighead\frontend
@@ -1583,12 +1583,12 @@ git commit -m "test: album meta/edit/retake 三个端到端脚本"
 
 ```powershell
 cd f:\Trae-work\bighead
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -c "from backend.routes.gallery import _load_album, _validate_job_id, _normalize_entry; from backend.config import ALBUM_FILENAME; print('PY=', __import__('sys').executable); print('OK=', ALBUM_FILENAME)"
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -c "from backend.routes.gallery import _load_album, _validate_job_id, _normalize_entry; from backend.config import ALBUM_FILENAME; print('PY=', __import__('sys').executable); print('OK=', ALBUM_FILENAME)"
 ruff check backend
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m compileall -q backend
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m compileall -q backend
 ```
 
-预期：输出 `PY= E:\Code\...\python.exe` + `OK= _album.json`，无 compile 报错，无 ruff 报错。
+预期：输出 `PY= <WEBUI_ROOT>\python.exe` + `OK= _album.json`，无 compile 报错，无 ruff 报错。
 
 ### Step 7.2: 前端门禁
 
@@ -1605,7 +1605,7 @@ npm run lint
 后端（新 terminal）:
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 ```
 
 前端（新 terminal）:
@@ -1622,7 +1622,7 @@ npm run dev
 
 ```powershell
 cd f:\Trae-work\bighead
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend/scripts/verify_album_meta.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend/scripts/verify_album_meta.py
 ```
 
 预期：`Result: N passed, 0 failed`（约 20 项）。

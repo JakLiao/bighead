@@ -15,6 +15,7 @@ Qwen 是 image-to-image,身份保真应当是架构级的,所以阈值定 0.55�
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -26,7 +27,10 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-D = Path(r"E:\Code\stable-diffusion-webui\models\qwen")
+_MODELS = Path(os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models"))
+if "<WEBUI_ROOT>" in str(_MODELS):
+    raise SystemExit("请先设 BIGHEAD_MODEL_BASE 指向 webui 的 models 目录")
+D = _MODELS / "qwen"
 OUT = ROOT / "outputs" / "_verify" / "qwen"
 OUT.mkdir(parents=True, exist_ok=True)
 SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "outputs" / "1a0b12477d66"
@@ -119,7 +123,9 @@ def face_embs(paths: list[Path]) -> dict:
     与 onnxruntime-gpu 互斥(见 requirements-qwen.txt 注释)。验证时借用
     SDXL 环境那一份,反正只是打分,不是运行时依赖。
     """
-    py = r"E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe"
+    py = os.environ.get("BIGHEAD_WEBUI_PYTHON", r"<WEBUI_ROOT>\.venv\Scripts\python.exe")
+    if "<WEBUI_ROOT>" in py or not Path(py).exists():
+        raise SystemExit("请先设 BIGHEAD_WEBUI_PYTHON 指向 webui venv 的解释器")
     script = Path(__file__).parent / "_face_embed_subproc.py"
     r = subprocess.run(
         [py, str(script), *[str(p) for p in paths]],

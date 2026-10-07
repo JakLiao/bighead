@@ -19,15 +19,38 @@
 
 ## 快速开始
 
+### 0. 配置路径(必需)
+
+本项目复用一套 Stable Diffusion WebUI 的环境与模型仓库,**不自带
+venv**。仓库里不写死任何人的本机路径,首次使用请设两个环境变量:
+
+```bash
+# Windows PowerShell
+$env:BIGHEAD_WEBUI_PYTHON="D:\path\to\stable-diffusion-webui\.venv\Scripts\python.exe"
+$env:BIGHEAD_MODEL_BASE="D:\path\to\stable-diffusion-webui\models"
+# macOS / Linux
+# export BIGHEAD_WEBUI_PYTHON=/path/to/stable-diffusion-webui/.venv/bin/python
+# export BIGHEAD_MODEL_BASE=/path/to/stable-diffusion-webui/models
+```
+
+| 变量 | 作用 | 不设的后果 |
+|---|---|---|
+| `BIGHEAD_WEBUI_PYTHON` | webui venv 的解释器 | `run.bat` 直接报错退出;验证脚本无法启动子进程 |
+| `BIGHEAD_MODEL_BASE` | 模型仓库根目录 | 加载模型时找不到权重 |
+
+未设置时脚本会**明确报错**而不是静默指向一个假路径。
+
+> ⚠️ 解释器不能换成 conda 或 PATH 里的 `python` —— 那套环境缺
+> `insightface` / `onnxruntime` / `diffusers` / `peft`,故障表现具有强误导性:
+> 服务能起、健康检查正常、连拍/拼图/滤镜全都能用,只有点「AI 生成」时才报
+> `No module named 'insightface'`。
+
 ### 1. 启动后端
 双击 `scripts/run.bat`,或手动:
 ```bash
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
+%BIGHEAD_WEBUI_PYTHON% -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 ```
 后端:http://localhost:8077
-
-> 解释器必须是上面那个 webui venv 的 `python.exe`,不能用 conda 或 PATH 里的
-> `python`——详见 [.trae/rules/project_rules.md](.trae/rules/project_rules.md)。
 
 ### 2. 启动前端
 ```bash
@@ -50,8 +73,8 @@ $env:BIGHEAD_API_TARGET="http://127.0.0.1:8077"
 
 ## 模型路径
 
-所有模型位于 `E:\Code\stable-diffusion-webui\models\`,在 `backend/config.py` 集中配置。
-无需重新下载。
+所有模型位于 `BIGHEAD_MODEL_BASE` 指向的目录(默认为 `<WEBUI_ROOT>\models`),
+在 `backend/config.py` 集中配置。无需重新下载。
 
 ## 显存预算(实测)
 
@@ -104,11 +127,11 @@ RTX 5070 Ti,SDXL + FaceID + 胶片 LoRA(未融合),steps=20,固定 seed 实测:
 
 ```powershell
 # 8GB 预算(默认,原设计口径)
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
+<WEBUI_ROOT>\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
 
 # 整条常驻显存(更快,占 11.65GB)
 $env:BIGHEAD_NO_OFFLOAD="1"
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
+<WEBUI_ROOT>\.venv\Scripts\python.exe -m uvicorn backend.app:app --port 8077
 ```
 
 ### 开关二:智能裁切(消除拼贴留白)
@@ -135,7 +158,7 @@ PASS=6 FAIL=0
 ## 测试与验证
 
 ```bash
-PY="E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe"
+PY="<WEBUI_ROOT>\.venv\Scripts\python.exe"
 
 # 后端接口全量验证(22 项,含错误路径与 WebSocket)
 $PY scripts\verify_api.py
@@ -431,6 +454,34 @@ outputs/{job_id}/
 AI 产物按 `job_id/style` 分目录,换风格重跑不会覆盖上一轮结果。
 `/api/jobs/{id}` 返回的 `images` 只包含最近一次生成的风格,同时回传
 `style` 字段供前端区分;要取历史结果直接按目录路径取。
+
+## 许可证
+
+双重许可,任选其一:
+
+- **[Apache License 2.0](LICENSE)** —— 免费,**明确允许商业使用**,
+  可闭源分发,无需申请或通知作者。想商用直接用它即可。
+- **[商业授权](COMMERCIAL-LICENSE.md)** —— 面向不接受任何开源代码的
+  企业客户:闭源许可 + 担保 + 优先支持。需签署双边合同。
+  ⚠️ 该文件目前是**占位模板**,不是可用的法律文本。
+
+另有 [NOTICE](NOTICE) 与 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md),
+记录 `backend/vendor/` 内上游代码的归属,分发时须一并保留。
+
+### ⚠️ 商用前必读:模型权重不在上述许可覆盖范围内
+
+本仓库**只含源码**,不含模型权重。而本项目的 AI 功能依赖多个
+**限制性或非商业**许可的第三方权重,例如:
+
+- **InsightFace 预训练权重** —— 代码是 MIT(可商用),但权重
+  **仅限非商业研究用途**。代码许可与权重许可是两件事。
+- 各社区 SDXL 微调权重、胶片 LoRA、IP-Adapter FaceID 权重 ——
+  条款各异,多为非商业。
+
+**本项目的任何授权(开源或商业)都无法传递这些权重的权利。**
+商业化前须逐一取得权利人授权,或替换为许可兼容的权重。
+另:处理人脸图像涉及生物识别信息,受 GDPR /《个人信息保护法》
+约束,须另行满足合规义务。
 
 ## 已知限制
 

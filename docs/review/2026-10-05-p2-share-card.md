@@ -144,10 +144,10 @@ AI 路径写的是 `outputs/{job_id}/ai/{style}/layout.jpg`，而 `gallery.py` �
 ### 后端自测
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_share_card.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend\scripts\verify_share_card.py
 # 结果: 44 通过, 0 失败 / ALL GREEN
 
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_album_meta.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend\scripts\verify_album_meta.py
 # Result: 25 passed, 0 failed
 ```
 
@@ -355,10 +355,10 @@ ALL GREEN
 
 ```powershell
 # 依赖预检（必须先跑，用错解释器只有点 AI 生成才报错）
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -c "import sys; from backend.peft_compat import ensure_peft; import insightface, onnxruntime, diffusers, transformers, torch, fastapi, uvicorn; assert ensure_peft(), 'peft still broken'; print('PY=', sys.executable); print('OK')"
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -c "import sys; from backend.peft_compat import ensure_peft; import insightface, onnxruntime, diffusers, transformers, torch, fastapi, uvicorn; assert ensure_peft(), 'peft still broken'; print('PY=', sys.executable); print('OK')"
 
 # 后端 8077
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 
 # 前端 5173（必须显式指明后端地址）
 cd frontend
@@ -409,7 +409,7 @@ Result: 11 passed, 0 failed / ALL GREEN
 
 ## §2 硬编码路径 → config.py + 环境变量
 
-`E:\Code\stable-diffusion-webui` 硬编码在 3 个运行时模块：`config.py`（权威来源）、`qwen_worker.py`（又抄了 4 条）、`pipeline.py`（`sd_xl_base.yaml` 又抄了一遍）。另有 11 个 `scripts/*.py` 一次性调试脚本各抄一份（不在运行时链路上，本次不动）。
+`<WEBUI_ROOT>` 硬编码在 3 个运行时模块：`config.py`（权威来源）、`qwen_worker.py`（又抄了 4 条）、`pipeline.py`（`sd_xl_base.yaml` 又抄了一遍）。另有 11 个 `scripts/*.py` 一次性调试脚本各抄一份（不在运行时链路上，本次不动）。
 
 现在：
 - `config.MODEL_BASE` 支持 `BIGHEAD_MODEL_BASE` 环境变量覆盖，换机器不用改代码；不设时默认值不变
@@ -473,7 +473,7 @@ verify-album-search.mjs   Result: 35 passed, 0 failed（含 Escape / dirty 置�
 
 | 门禁 | 结果 |
 |---|---|
-| 依赖预检 | `PY= E:\Code\...\python.exe` + `OK` |
+| 依赖预检 | `PY= <WEBUI_ROOT>\python.exe` + `OK` |
 | `ruff check backend scripts` | All checks passed |
 | `python -m compileall -q backend scripts` | OK |
 | `npx tsc -b --force` | 无错误 |
@@ -493,8 +493,8 @@ E2E 断言总数与改动前基线**完全一致（445）**，无回归。后端
 两个新脚本是 Python 的、跑在 `backend/`，**故意没有**加进 `frontend/run-all-verify.ps1`（那个脚本只管 Node 脚本，混入 Python 会让它的退出码/崩溃检测语义变浑浊）：
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_mirror.py
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" backend\scripts\verify_paths.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend\scripts\verify_mirror.py
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" backend\scripts\verify_paths.py
 ```
 
 ## 本轮未做（明确留给后续）

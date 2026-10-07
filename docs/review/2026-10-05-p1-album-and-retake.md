@@ -166,10 +166,10 @@ c9a9671  test(p1): album-meta/album-edit/retake-bar 三个 e2e + pose 索引回�
 
 ```powershell
 # 依赖预检（必须用 webui venv）
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -c "import sys; from backend.peft_compat import ensure_peft; import insightface, onnxruntime, diffusers, transformers, torch, fastapi, uvicorn; assert ensure_peft(), 'peft still broken'; print('PY=', sys.executable); print('OK')"
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -c "import sys; from backend.peft_compat import ensure_peft; import insightface, onnxruntime, diffusers, transformers, torch, fastapi, uvicorn; assert ensure_peft(), 'peft still broken'; print('PY=', sys.executable); print('OK')"
 
 # 后端 8077
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 
 # 前端 5173（沙箱内需把 npm 缓存指到项目内，否则 Node 写 E:\nodejs\node_cache\_logs 会被拦）
 cd frontend

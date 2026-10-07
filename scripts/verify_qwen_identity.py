@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import subprocess
 import sys
 import time
@@ -26,7 +27,10 @@ import torch
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parent.parent
-D = Path(r"E:\Code\stable-diffusion-webui\models\qwen")
+_MODELS = Path(os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models"))
+if "<WEBUI_ROOT>" in str(_MODELS):
+    raise SystemExit("请先设 BIGHEAD_MODEL_BASE 指向 webui 的 models 目录")
+D = _MODELS / "qwen"
 SRC = ROOT / "outputs" / "1a0b12477d66"
 OUT = ROOT / "outputs" / "_verify" / "qwen_identity"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -150,7 +154,9 @@ def build_pipe(gguf: str):
 
 def face_embs(paths: list[Path]) -> dict:
     """借 SDXL 环境(有 insightface)取 embedding, 子进程隔离。"""
-    py = r"E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe"
+    py = os.environ.get("BIGHEAD_WEBUI_PYTHON", r"<WEBUI_ROOT>\.venv\Scripts\python.exe")
+    if "<WEBUI_ROOT>" in py or not Path(py).exists():
+        raise SystemExit("请先设 BIGHEAD_WEBUI_PYTHON 指向 webui venv 的解释器")
     script = Path(__file__).parent / "_face_embed_subproc.py"
     r = subprocess.run(
         [py, str(script), *[str(p) for p in paths]],

@@ -9,6 +9,7 @@ fuse_lora 不可逆,且 8GB 预算装不下两套 SDXL,因此 on/off 对照用
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,7 +22,15 @@ SEED = 20240517
 OUT = ROOT / "outputs" / "_verify" / "sdxlfilm"
 OUT.mkdir(parents=True, exist_ok=True)
 STYLE_KEY = "PORTRAIT_HK"
-PY = r"E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe"
+# 子进程解释器与本脚本不同(要隔离 CUDA 状态),因此单独配。
+# 用占位符而不是硬编码某台机器的路径: 仓库是公开的。
+PY = os.environ.get("BIGHEAD_WEBUI_PYTHON", r"<WEBUI_ROOT>\.venv\Scripts\python.exe")
+if "<WEBUI_ROOT>" in PY or not Path(PY).exists():
+    raise SystemExit(
+        "请先设 BIGHEAD_WEBUI_PYTHON 指向 Stable Diffusion WebUI 的 venv 解释器, "
+        "例如:\n"
+        '  $env:BIGHEAD_WEBUI_PYTHON="D:\\path\\to\\stable-diffusion-webui\\.venv\\Scripts\\python.exe"'
+    )
 
 
 def face_input():

@@ -105,7 +105,7 @@ def test_apply_filter_with_era_routes_premodern():
 
 ```powershell
 cd f:\Trae-work\bighead
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m pytest backend/tests/test_filters_era.py -v
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m pytest backend/tests/test_filters_era.py -v
 ```
 
 预期: `3 passed`。
@@ -476,7 +476,7 @@ process.exit(FAIL.length ? 1 : 0);
 ```powershell
 cd f:\Trae-work\bighead
 ruff check backend scripts
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m compileall -q backend scripts
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m compileall -q backend scripts
 ```
 
 预期: 无报错。
@@ -1307,12 +1307,12 @@ git commit -m "feat: sticker editor (自研 canvas 拖拽 + 拼图前烧录)"
 
 ```powershell
 cd f:\Trae-work\bighead
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -c "from backend.filters import apply_filter; from backend.config import ERA_PRESETS; print('PY=', __import__('sys').executable); print('OK=', len(ERA_PRESETS))"
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -c "from backend.filters import apply_filter; from backend.config import ERA_PRESETS; print('PY=', __import__('sys').executable); print('OK=', len(ERA_PRESETS))"
 ruff check backend scripts
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m compileall -q backend scripts
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m compileall -q backend scripts
 ```
 
-预期: 输出 `PY= E:\Code\...\python.exe` + `OK= 2`，无 compile 报错，无 ruff 报错。
+预期: 输出 `PY= <WEBUI_ROOT>\python.exe` + `OK= 2`，无 compile 报错，无 ruff 报错。
 
 ### Step 4.2: 前端门禁
 
@@ -1329,7 +1329,7 @@ npm run lint
 后端（新 terminal）:
 
 ```powershell
-& "E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
+& "<WEBUI_ROOT>\.venv\Scripts\python.exe" -m uvicorn backend.app:app --host 127.0.0.1 --port 8077
 ```
 
 前端（新 terminal）:

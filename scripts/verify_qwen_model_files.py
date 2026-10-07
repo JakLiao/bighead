@@ -8,11 +8,15 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import sys
 from pathlib import Path
 
-D = Path(r"E:\Code\stable-diffusion-webui\models\qwen")
+_MODELS = Path(os.environ.get("BIGHEAD_MODEL_BASE", r"<WEBUI_ROOT>\models"))
+if "<WEBUI_ROOT>" in str(_MODELS):
+    raise SystemExit("请先设 BIGHEAD_MODEL_BASE 指向 webui 的 models 目录")
+D = _MODELS / "qwen"
 PASS: list[str] = []
 FAIL: list[str] = []
 

@@ -933,19 +933,19 @@ Qwen pipeline **不按请求尺寸出图**，而是吸附到自己的分辨率�
 - [ ] **Step 1: 记录当前版本（回退依据）**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m pip freeze > outputs\_verify\pip_freeze_before_qwen.txt
+<WEBUI_ROOT>\.venv\Scripts\python.exe -m pip freeze > outputs\_verify\pip_freeze_before_qwen.txt
 ```
 
 - [ ] **Step 2: 装 gguf 并升级 diffusers/transformers**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -m pip install -U "diffusers>=0.40.0" "transformers>=4.51.0" gguf accelerate
+<WEBUI_ROOT>\.venv\Scripts\python.exe -m pip install -U "diffusers>=0.40.0" "transformers>=4.51.0" gguf accelerate
 ```
 
 - [ ] **Step 3: 验证 Qwen 类存在**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -c "import diffusers; print(diffusers.__version__); print(hasattr(diffusers,'QwenImageEditPipeline')); print(hasattr(diffusers,'GGUFQuantizationConfig'))"
+<WEBUI_ROOT>\.venv\Scripts\python.exe -c "import diffusers; print(diffusers.__version__); print(hasattr(diffusers,'QwenImageEditPipeline')); print(hasattr(diffusers,'GGUFQuantizationConfig'))"
 ```
 
 Expected: 版本号 ≥0.40.0，两行 `True`
@@ -953,7 +953,7 @@ Expected: 版本号 ≥0.40.0，两行 `True`
 - [ ] **Step 4: 关键 —— 确认升级没打断现有 SDXL**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -c "from backend.pipeline import pipeline; print('SDXL import OK')"
+<WEBUI_ROOT>\.venv\Scripts\python.exe -c "from backend.pipeline import pipeline; print('SDXL import OK')"
 ```
 
 Expected: `SDXL import OK`（若失败，说明 transformers 升级破坏了 4.37 兼容性，需回退并改用隔离环境）
@@ -1000,7 +1000,7 @@ sys.exit(main())
 - [ ] **Step 2: 运行下载**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe scripts\download_qwen.py
+<WEBUI_ROOT>\.venv\Scripts\python.exe scripts\download_qwen.py
 ```
 
 Expected: 三个路径都打印出来。约 22 GB，耗时取决于网速。
@@ -1017,11 +1017,11 @@ Expected: 三个路径都打印出来。约 22 GB，耗时取决于网速。
 > 这是**最低版本要求**的实证。
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -c @"
+<WEBUI_ROOT>\.venv\Scripts\python.exe -c @"
 import torch
 from diffusers import QwenImageTransformer2DModel, GGUFQuantizationConfig
 t = QwenImageTransformer2DModel.from_single_file(
-    r'E:\Code\stable-diffusion-webui\models\qwen\transformer\qwen-image-edit-2511-Q4_K_M.gguf',
+    r'<WEBUI_ROOT>\models\qwen\transformer\qwen-image-edit-2511-Q4_K_M.gguf',
     quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16),
     dtype=torch.bfloat16, config='Qwen/Qwen-Image-Edit-2511', subfolder='transformer')
 print('transformer loaded', sum(p.numel() for p in t.parameters())/1e9, 'B params')
@@ -1114,7 +1114,7 @@ if __name__ == "__main__":
 - [ ] **Step 2: 运行，确认失败**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe scripts\verify_qwen_identity.py
+<WEBUI_ROOT>\.venv\Scripts\python.exe scripts\verify_qwen_identity.py
 ```
 
 Expected: `ModuleNotFoundError: No module named 'backend.qwen_pipeline'`
@@ -1130,9 +1130,9 @@ Expected: `ModuleNotFoundError: No module named 'backend.qwen_pipeline'`
 AI_BACKEND = os.environ.get("BIGHEAD_AI_BACKEND", "qwen").lower()
 
 QWEN_REPO = "Qwen/Qwen-Image-Edit-2511"
-QWEN_GGUF = r"E:\Code\stable-diffusion-webui\models\qwen\transformer\qwen-image-edit-2511-Q4_K_M.gguf"
-QWEN_VAE = r"E:\Code\stable-diffusion-webui\models\qwen\vae\qwen_image_vae.safetensors"
-QWEN_TEXT_ENCODER = r"E:\Code\stable-diffusion-webui\models\qwen\text_encoder\qwen_2.5_vl_7b_fp8_scaled.safetensors"
+QWEN_GGUF = r"<WEBUI_ROOT>\models\qwen\transformer\qwen-image-edit-2511-Q4_K_M.gguf"
+QWEN_VAE = r"<WEBUI_ROOT>\models\qwen\vae\qwen_image_vae.safetensors"
+QWEN_TEXT_ENCODER = r"<WEBUI_ROOT>\models\qwen\text_encoder\qwen_2.5_vl_7b_fp8_scaled.safetensors"
 QWEN_STEPS = int(os.environ.get("BIGHEAD_QWEN_STEPS", "30"))
 QWEN_SIZE = (768, 1024)   # 竖版,匹配大头贴格位比例
 ```
@@ -1269,7 +1269,7 @@ def unload() -> None:
 - [ ] **Step 5: 运行验证**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe scripts\verify_qwen_identity.py
+<WEBUI_ROOT>\.venv\Scripts\python.exe scripts\verify_qwen_identity.py
 ```
 
 Expected: 4 张余弦分数 + `VERDICT: PASS`
@@ -1331,7 +1331,7 @@ def generate_for_style(
 
 ```powershell
 Remove-Item outputs\_verify\flow_*.jpg -ErrorAction SilentlyContinue
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -u scripts\verify_flow_real.py
+<WEBUI_ROOT>\.venv\Scripts\python.exe -u scripts\verify_flow_real.py
 ```
 
 Expected: 19/19 PASS，且 `job.style` 正确回显
@@ -1390,7 +1390,7 @@ STYLES = {
 - [ ] **Step 2: 验证四风格仍有明显差异**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -u scripts\verify_style_diff.py
+<WEBUI_ROOT>\.venv\Scripts\python.exe -u scripts\verify_style_diff.py
 ```
 
 Expected: 四风格两两差异均超过阈值（复用现有脚本口径）
@@ -1417,7 +1417,7 @@ $env:BIGHEAD_AI_BACKEND="sdxl"
 - [ ] **Step 2: 验证回退后功能完整**
 
 ```powershell
-E:\Code\stable-diffusion-webui\.venv\Scripts\python.exe -u scripts\verify_flow_real.py
+<WEBUI_ROOT>\.venv\Scripts\python.exe -u scripts\verify_flow_real.py
 ```
 
 Expected: 19/19 PASS
