@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "stickers": [
+    {
+      "key": "retro_ticket",
+      "name": "复古票根",
+      "src": "retro_ticket.png",
+      "category": "复古",
+      "tags": [
+        "票根",
+        "复古",
+        "胶片"
+      ]
+    },
+    {
+      "key": "film_strip",
+      "name": "胶片格",
+      "src": "film_strip.png",
+      "category": "复古",
+      "tags": [
+        "胶片",
+        "拍立得",
+        "摄影"
+      ]
+    },
+    {
+      "key": "rainbow_arc",
+      "name": "彩虹",
+      "src": "rainbow_arc.png",
+      "category": "童趣",
+      "tags": [
+        "彩虹",
+        "童趣",
+        "多彩"
+      ]
+    },
+    {
+      "key": "flower_spray",
+      "name": "小花束",
+      "src": "flower_spray.png",
+      "category": "自然",
+      "tags": [
+        "小花",
+        "手绘",
+        "春日"
+      ]
+    },
+    {
+      "key": "cat_paw",
+      "name": "猫爪印",
+      "src": "cat_paw.png",
+      "category": "动物",
+      "tags": [
+        "猫",
+        "肉垫",
+        "可爱"
+      ]
+    },
+    {
+      "key": "crown",
+      "name": "皇冠",
+      "src": "crown.png",
+      "category": "奢华",
+      "tags": [
+        "皇冠",
+        "金色",
+        "氛围"
+      ]
+    },
+    {
+      "key": "music_note",
+      "name": "双音符",
+      "src": "music_note.png",
+      "category": "音乐",
+      "tags": [
+        "音符",
+        "手绘",
+        "节奏"
+      ]
+    },
+    {
+      "key": "washi_tape",
+      "name": "和纸胶带",
+      "src": "washi_tape.png",
+      "category": "手作",
+      "tags": [
+        "胶带",
+        "手账",
+        "半透明"
+      ]
+    }
+  ]
+}

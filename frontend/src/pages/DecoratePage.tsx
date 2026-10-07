@@ -29,8 +29,8 @@ import {
   type DoodleStroke,
   type DoodleTool,
 } from "../components/doodles/doodleTypes";
-import { StickerEditor, paintStickers } from "../components/stickers/StickerEditor";
-import type { StickerPlacement } from "../components/stickers/stickerTypes";
+import { StickerEditor } from "../components/stickers/StickerEditor";
+import { burnStickers } from "../components/stickers/burnStickers";
 
 /** 拼图最多用几张(与 HomePage 的连拍张数一致)。 */
 const PHOTO_COUNT_FOR_LAYOUT = 4;
@@ -104,53 +104,6 @@ async function burnDoodles(photoBlob: Blob, strokes: DoodleStroke[]): Promise<Bl
 
     // toBlob 在 canvas tainted 或尺寸超限时给 null, 回落原图而不是抛错 ——
     // 烧录失败不该让用户丢掉整轮照片。
-    const burned = await new Promise<Blob | null>((resolve) =>
-      out.toBlob(resolve, "image/jpeg", 0.92),
-    );
-    return burned ?? photoBlob;
-  } finally {
-    bitmap.close();
-  }
-}
-
-/**
- * 把用户摆的贴纸烧进照片, 返回新 Blob。
- *
- * 复用 paintStickers(与 StickerEditor 同一个渲染器), 保证"摆时看到的那颗"
- * 与"这里烧进去的那颗"一致 —— 与 burnDoodles 是同一条策略。
- *
- * 同样隔一层透明 canvas 再贴: 贴纸有 opacity 字段, 直接画在照片上时
- * 半透明贴纸会把照片一起调淡, 等于给整张照片加了层滤镜。隔一层之后
- * 半透明只作用在贴纸自己身上。
- *
- * selected 传 -1: 选中虚线框是编辑器 UI, 绝不能烧进成片。
- *
- * try/finally 释放 ImageBitmap 的理由与 burnDoodles 完全相同(createImageBitmap
- * 是显式资源, 不 close 不会自动回收, 一次抛错就泄漏 4.7MB)。
- */
-async function burnStickers(
-  photoBlob: Blob,
-  stickers: StickerPlacement[],
-): Promise<Blob> {
-  if (stickers.length === 0) return photoBlob;
-  const bitmap = await createImageBitmap(photoBlob);
-  try {
-    const w = bitmap.width;
-    const h = bitmap.height;
-
-    const layer = document.createElement("canvas");
-    layer.width = w;
-    layer.height = h;
-    paintStickers(layer.getContext("2d"), stickers);
-
-    const out = document.createElement("canvas");
-    out.width = w;
-    out.height = h;
-    const ctx = out.getContext("2d");
-    if (!ctx) return photoBlob;
-    ctx.drawImage(bitmap, 0, 0, w, h);
-    ctx.drawImage(layer, 0, 0);
-
     const burned = await new Promise<Blob | null>((resolve) =>
       out.toBlob(resolve, "image/jpeg", 0.92),
     );

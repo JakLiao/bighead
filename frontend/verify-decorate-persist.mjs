@@ -177,7 +177,7 @@ check("无未捕获的页面异常", pageErrors.length === 0, pageErrors.join(" 
 
 // ---- 清理 ----
 await page.evaluate(async (j) => {
-  await fetch(`/api/gallery/${j}`, { method: "DELETE" }).catch(() => {});
+  await fetch(`/api/gallery/${j}?permanent=true`, { method: "DELETE" }).catch(() => {});
 }, jobId);
 await browser.close();
 

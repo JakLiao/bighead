@@ -206,7 +206,7 @@ try {
     before === 200 && after === 200, `before=${before} after=${after}`);
 } finally {
   await page.evaluate(async (jid) => {
-    await fetch(`/api/gallery/${jid}`, { method: "DELETE" }).catch(() => {});
+    await fetch(`/api/gallery/${jid}?permanent=true`, { method: "DELETE" }).catch(() => {});
   }, jobId);
   await browser.close();
 }
