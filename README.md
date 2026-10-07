@@ -178,8 +178,76 @@ $PY scripts\bench_offload.py
 $PY scripts\verify_collage_crop.py
 ```
 
+`backend/scripts/` 下有一批**不需要起服务**的进程内验证(直接 import 被测模块),
+它们比 E2E 快得多, 改后端逻辑后应该先跑这些:
+
+```bash
+# 画廊回收站(软删除): 纯函数边界 + TestClient 路由, 全程在临时目录里,
+# 绝不碰真实 outputs/。不需要起后端。
+$PY backend\scripts\verify_gallery_trash.py
+
+# 相册元数据纯函数(不碰文件系统)
+$PY backend\scripts\verify_album_meta.py
+
+# 深浅两层产物镜像的路径契约
+$PY backend\scripts\verify_mirror.py
+```
+
+回收站那个特意分两层: 纯函数层钉边界(畸形目录名、保留期夹逼边界、
+元数据 sidecar 往返), 路由层用 `TestClient` 钉契约(软删/恢复/冲突保护/
+清空/路径穿越)。E2E 只能证明"正常路径走得通", 这两层才覆盖得住
+畸形输入与 off-by-one。详见 [测试规范](docs/testing-standards.md)。
+
+### 写会删数据的脚本时, 白名单比注释可靠
+
+`verify-gallery-trash.mjs` 头部曾写着「本脚本自己造数据、自己清理,
+**绝不碰用户已有的 job**」, 而实现里用的是「全选已加载的 N 条」——
+那选中的是**页面上所有卡片, 包括用户自己的照片**。加上另一条断言
+`回收站 === 0`, 脚本为了满足它只能走物理删除, 于是用户 222 条照片
+全部丢失(`outputs/` 被 gitignore, 无任何恢复途径)。
+
+现在那条路径改成: 目标取 `created ∩ 后端列表`, 逐个勾选, 并在点删除**之前**
+加一条刹车断言 —— 选中数量必须恰好等于白名单大小, 不等就 `throw`。
+断言也从"回收站是 0"改成比**增量**(`取消后回收站未增加`), 因为要求绝对值 0
+等于要求"必须物理删除"。
+
+给后来者的两条规则:
+
+1. **注释不是保护, 白名单才是。** 声明与实现之间没有任何强制关系。
+2. 评审时该问的不是"新代码正确吗", 而是**"新代码删的东西和旧代码一样吗"**。
+   把一个危险但从未暴露的实现换成更"正确"的实现, 会让旁边潜伏的 bug 显形 ——
+   而那些 bug 可能正是数据损失的原因。
+
+前端同理: 框选与 Shift 多选既有 23 项 E2E(`verify-gallery-marquee.mjs`,
+真拖一次框), 也有 85 项纯函数单元测试:
+
+```bash
+cd frontend
+node verify-gallery-selection.mjs
+```
+
+纯函数在 `src/components/gallery/selection.ts`, 几何与区间判定都不碰
+React/DOM, 于是能脱离浏览器逐条钉边界。分工依据是**能不能脱离浏览器验证**:
+`getBoundingClientRect` 留在组件里, "什么算相交"归纯函数。E2E 只能告诉你
+"框选没反应", 纯函数测试才能告诉你是哪个判定写错了。
+
+这套测试沿用项目既有的「Vite 转译 TS + 浏览器内 import」模式
+(同 `verify-masks.mjs`), **不需要新增任何依赖**; 代价是必须先起
+dev server, 不能单跑。
+
 `verify_ai.py` 会用 InsightFace 提取原图与生成图的 512 维人脸向量,
 计算余弦相似度来量化"是否还是同一个人",而不是只看图能不能出。
+
+### 写测试时
+
+命令清单告诉你"跑什么",[docs/testing-standards.md](docs/testing-standards.md)
+告诉你"结果说明了什么"。三条核心准则:
+
+1. **改契约前先看谁在依赖它**,并判断契约本身对不对 —— 契约错了才改测试。
+2. **断言钉不变量,不钉当前取值;别吞异常** —— 硬编码数量和
+   `.catch(() => null)` 是回归测试失效的起点。
+3. **删除操作只删显式清单,绝不按特征扫** —— 按特征推断"哪些是我造的",
+   这个假设在真实用户数据面前不成立。
 
 ## 依赖:PEFT(项目内隔离安装)
 

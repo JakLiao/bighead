@@ -13,6 +13,9 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/.npmcache/
+# npm 的本地缓存目录。sandbox 下 npm 无法写 %LOCALAPPDATA% 时会退到
+# 项目根建这个, 与已有的 frontend/.npmcache/ 是同一类东西。
+.npm-cache/
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 
