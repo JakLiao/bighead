@@ -19,13 +19,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { STICKER_SHAPES, type StickerShapeKey } from "../masks/geometry";
 import type { DoodleSafeArea } from "../doodles/doodleTypes";
 import {
+  ASSET_STICKER_DEFAULT_SIZE,
+  isAssetSticker,
   STICKER_COLORS,
   STICKER_DEFAULT_COLOR,
   STICKER_DEFAULT_SIZE,
   STICKER_SHAPE_KEYS,
   STICKER_SHAPE_NAMES,
+  stickerFill,
   type StickerPlacement,
 } from "./stickerTypes";
+import {
+  collectAssetKeys,
+  getLoadedStickerImages,
+  getStickerAssets,
+  loadStickerImage,
+  loadStickerManifest,
+  preloadStickerAssets,
+} from "./stickerLibrary";
 
 interface Props {
   /** 照片 src(dataURL 或 /outputs URL) */
@@ -63,13 +74,14 @@ export function paintStickers(
   ctx: CanvasRenderingContext2D | null,
   stickers: StickerPlacement[],
   selected = -1,
+  images: ReadonlyMap<string, CanvasImageSource> = getLoadedStickerImages(),
 ) {
   if (!ctx) return;
   const { width, height } = ctx.canvas;
   ctx.clearRect(0, 0, width, height);
   const u = Math.min(width, height);
   for (let i = 0; i < stickers.length; i++) {
-    paintSticker(ctx, stickers[i], width, height, u, i === selected);
+    paintSticker(ctx, stickers[i], width, height, u, i === selected, images);
   }
 }
 
@@ -80,46 +92,76 @@ function paintSticker(
   h: number,
   u: number,
   selected: boolean,
+  images: ReadonlyMap<string, CanvasImageSource>,
 ) {
-  const path = STICKER_SHAPES[s.shape];
-  // 未知 shape(存档里的脏数据)跳过整张, 不让一条坏记录毁掉整层贴纸。
-  if (!path) return;
   const size = s.size * u;
   if (size <= 0) return;
 
   ctx.save();
   ctx.translate(s.x * w, s.y * h);
   if (s.rotation) ctx.rotate((s.rotation * Math.PI) / 180);
-  // 路径定义在 0..1 且以左上为原点(STICKER_SHAPES 的约定), 先缩放再平移
-  // 让 (x,y) 落在贴纸的**中心**。缩放后坐标系里 1 单位 = size 像素。
-  ctx.scale(size, size);
-  ctx.translate(-0.5, -0.5);
   ctx.globalAlpha = s.opacity ?? 1;
 
-  const p = new Path2D(path);
-  if (s.fill) {
-    ctx.fillStyle = s.fill;
-    ctx.fill(p);
-  }
-  if (s.stroke) {
-    ctx.strokeStyle = s.stroke;
-    // 线宽除以 size: 当前坐标系已被缩放了 size 倍, 不除的话 2 会变成
-    // 2*size 像素, 大贴纸的描边会粗得离谱。
-    ctx.lineWidth = (s.strokeWidth ?? 0.02) / size;
-    ctx.stroke(p);
+  if (isAssetSticker(s)) {
+    // 位图贴纸。drawImage 画在以 (0,0) 为左上角的 size×size 方框内 ——
+    // 与代码形状"路径定义在 0..1、缩放后 translate(-0.5,-0.5) 居中"完全
+    // 同一套几何, 所以两类贴纸的 x/y 语义一致, 命中测试也不用分叉。
+    //
+    // 素材未就绪(未加载 / 加载失败 / manifest 里没登记)时**跳过这一张**,
+    // 与未知 shape key 的处理同构: 一条坏记录不该毁掉整层贴纸。
+    const img = images.get(s.asset);
+    // 0 宽高会让 drawImage 抛 IndexSizeError, 故一并挡掉。
+    if (!img || !(img as CanvasImageSource & { width?: number }).width) return;
+    ctx.drawImage(img, -size / 2, -size / 2, size, size);
+  } else {
+    const path = STICKER_SHAPES[s.shape];
+    // 未知 shape(存档里的脏数据)跳过整张, 不让一条坏记录毁掉整层贴纸。
+    if (!path) return;
+    // 路径定义在 0..1 且以左上为原点(STICKER_SHAPES 的约定), 先缩放再平移
+    // 让 (x,y) 落在贴纸的**中心**。缩放后坐标系里 1 单位 = size 像素。
+    ctx.scale(size, size);
+    ctx.translate(-0.5, -0.5);
+
+    const p = new Path2D(path);
+    if (s.fill) {
+      ctx.fillStyle = s.fill;
+      ctx.fill(p);
+    }
+    if (s.stroke) {
+      ctx.strokeStyle = s.stroke;
+      // 线宽除以 size: 当前坐标系已被缩放了 size 倍, 不除的话 2 会变成
+      // 2*size 像素, 大贴纸的描边会粗得离谱。
+      ctx.lineWidth = (s.strokeWidth ?? 0.02) / size;
+      ctx.stroke(p);
+    }
   }
 
   if (selected) {
     // 选中框: 虚线 + 半透明底, 让"哪个被选中了"在密集摆放时一眼可见。
     // 只在编辑器里画, 烧录时 selected = -1。
-    ctx.setLineDash([0.04, 0.03]);
-    ctx.lineWidth = 0.012;
-    ctx.strokeStyle = "#ffffff";
-    ctx.strokeRect(0, 0, 1, 1);
-    ctx.setLineDash([]);
-    ctx.lineWidth = 0.02;
-    ctx.strokeStyle = "#3b6cff";
-    ctx.strokeRect(0, 0, 1, 1);
+    //
+    // 不受上面的 translate/scale 影响: 代码形状分支已把坐标系缩放成
+    // 1 单位 = size 像素, 位图分支保持像素单位, 两者在这里的画法必须
+    // 各按各的坐标系, 否则位图贴纸的选中框会细成一条看不见的线。
+    if (isAssetSticker(s)) {
+      ctx.setLineDash([size * 0.04, size * 0.03]);
+      ctx.lineWidth = Math.max(1, size * 0.012);
+      ctx.strokeStyle = "#ffffff";
+      ctx.strokeRect(-size / 2, -size / 2, size, size);
+      ctx.setLineDash([]);
+      ctx.lineWidth = Math.max(1, size * 0.02);
+      ctx.strokeStyle = "#3b6cff";
+      ctx.strokeRect(-size / 2, -size / 2, size, size);
+    } else {
+      ctx.setLineDash([0.04, 0.03]);
+      ctx.lineWidth = 0.012;
+      ctx.strokeStyle = "#ffffff";
+      ctx.strokeRect(0, 0, 1, 1);
+      ctx.setLineDash([]);
+      ctx.lineWidth = 0.02;
+      ctx.strokeStyle = "#3b6cff";
+      ctx.strokeRect(0, 0, 1, 1);
+    }
   }
   ctx.restore();
 }
@@ -154,13 +196,29 @@ export function StickerEditor({
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /**
-   * 当前工具: "select" = 拖动/选中; 其余值 = "接下来点一下就放这种形状"。
+   * 当前工具: "select" = 拖动/选中; 其余值 = "接下来点一下就放这种贴纸"。
    * 放完立刻回 select —— 连点几下想摆两颗同形贴纸时, 手动切回来太啰嗦,
    * 而"摆完仍处于放置态"会导致第二颗想拖动旧贴纸时反而多出一颗。
+   *
+   * 形状 key 与素材 key 共用一个 string 命名空间: STICKER_SHAPES 的 key 全是
+   * 小写英文单词(heart/star/...), 素材 key 由 build_stickers.py 的登记表
+   * 定(同样是 snake_case), 两者不可能重名 —— 所以不必再套一层
+   * {kind, key} 结构体。判定走 STICKER_SHAPE_KEYS.includes, 重名会让它
+   * 静默变回代码形状, 但那种情况在素材登记时就能发现。
    */
-  const [tool, setTool] = useState<StickerShapeKey | "select">("select");
+  const [tool, setTool] = useState<string>("select");
   const [color, setColor] = useState(STICKER_DEFAULT_COLOR);
   const [selected, setSelected] = useState<number>(-1);
+  /** 位图素材表。挂载后异步填入, 失败时为空数组(只剩代码形状可用)。 */
+  const [assets, setAssets] = useState(() => getStickerAssets());
+  /**
+   * 已解码位图数量。放进 repaint 依赖: 素材异步到位后必须重画一次, 否则
+   * 用户点了位图贴纸但画布上没东西(或仍是上一帧), 直到下一次拖动才出现。
+   *
+   * 用数量而非 Map 本身作依赖: Map 是可变对象, 引用不变, useEffect 不会重跑;
+   * 而"哪几张"的变化与渲染无关 —— 渲染每次都传最新的 getLoadedStickerImages()。
+   */
+  const [assetImageCount, setAssetImageCount] = useState(0);
   // 正在拖动的贴纸。放 ref 不放 state: 拖动过程中每一帧都要算新坐标,
   // 放 state 会让"拖动"变成"每个 pointermove 触发一次 React 重渲染 +
   // 一次 store 写入", 手感发木。
@@ -191,8 +249,67 @@ export function StickerEditor({
             i === drag.idx ? { ...s, x: drag.localX, y: drag.localY } : s,
           )
         : stickers;
-    paintStickers(ctx, list, selected);
+    // 每次都取最新的已解码图: 素材是异步到的, 缓存 Map 会被 preload 填充。
+    paintStickers(ctx, list, selected, getLoadedStickerImages());
   }, [stickers, selected]);
+
+  /**
+   * 拉 manifest + 预加载全部素材。
+   *
+   * 预加载全部(而非只加载已摆放的): 工具条上的缩略图是用户挑贴纸的依据,
+   * 而点按钮的下一帧就要画到画布上 —— 按需加载会让"点了没反应"。
+   * 8 张 512px PNG 合计约 270KB, 一次性换"点哪张都立刻能用"是划算的。
+   *
+   * 失败不阻断: loadStickerManifest 内部已降级为空表, 这里只是不再有点位图。
+   */
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      await loadStickerManifest();
+      if (!alive) return;
+      const list = getStickerAssets();
+      setAssets(list);
+      await Promise.all(list.map((a) => loadStickerImage(a.key)));
+      if (!alive) return;
+      // 触发一次重画: 此时位图已就绪, 但画布上可能还留着"素材缺失"那帧。
+      setAssetImageCount(getLoadedStickerImages().size);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /**
+   * 换了一组贴纸(例如画廊重新编辑灌入初始布局)时, 把用到的位图补齐。
+   *
+   * 上面的 effect 只覆盖"素材表本身"的加载; 这里覆盖"**某张**素材何时
+   * 被摆上画布"—— 比如 store 里已有位图贴纸、本次挂载才第一次进入编辑。
+   * 补齐后同样要重画, 否则画布会停在"位图缺失"的那一帧。
+   */
+  useEffect(() => {
+    if (collectAssetKeys(stickers).length === 0) return;
+    let alive = true;
+    (async () => {
+      await preloadStickerAssets(stickers);
+      if (!alive) return;
+      setAssetImageCount(getLoadedStickerImages().size);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [stickers]);
+
+  /**
+   * 位图解码完成后重画一帧。
+   *
+   * 刻意**不**把 assetImageCount 塞进 repaint 的依赖数组: 那个数组里的
+   * 每项都必须被回调体真正读到, 塞一个只当"重跑信号"的值属于骗 lint ——
+   * 下一个人删掉它时 lint 不会报警, 而画布会静默停在"位图缺失"那一帧。
+   * 独立成一个 effect, "解码完成 -> 该重画"这个因果关系就写在明面上。
+   */
+  useEffect(() => {
+    repaint();
+  }, [assetImageCount, repaint]);
 
   useEffect(() => {
     repaint();
@@ -273,17 +390,28 @@ export function StickerEditor({
       return;
     }
     // 放置态: 落点即新贴纸中心。放完回到 select 并选中它, 用户接着就能拖。
-    const next: StickerPlacement[] = [
-      ...stickers,
-      {
-        shape: tool,
-        x: p.x,
-        y: p.y,
-        size: STICKER_DEFAULT_SIZE,
-        rotation: 0,
-        fill: color,
-      },
-    ];
+    //
+    // 工具名先问"是不是内置形状": 是则走 Path2D 贴纸(带 fill), 否则视为
+    // 素材 key 走位图贴纸(无 fill)。素材图片此刻可能还没解码完 ——
+    // 摆上去后由 stickers 变化的 effect 补预加载并重画。
+    const isShape = (STICKER_SHAPE_KEYS as string[]).includes(tool);
+    const placed: StickerPlacement = isShape
+      ? {
+          shape: tool as StickerShapeKey,
+          x: p.x,
+          y: p.y,
+          size: STICKER_DEFAULT_SIZE,
+          rotation: 0,
+          fill: color,
+        }
+      : {
+          asset: tool,
+          x: p.x,
+          y: p.y,
+          size: ASSET_STICKER_DEFAULT_SIZE,
+          rotation: 0,
+        };
+    const next: StickerPlacement[] = [...stickers, placed];
     onChange(next);
     setSelected(next.length - 1);
     setTool("select");
@@ -365,9 +493,15 @@ export function StickerEditor({
     onChange(next);
   };
 
-  /** 改色: 只改选中的那颗。没选中就不动 —— 避免"点了色板全场变色"的意外。 */
+  /**
+   * 改色: 只改选中的那颗。没选中就不动 —— 避免"点了色板全场变色"的意外。
+   *
+   * 位图贴纸直接跳过: PNG 自带颜色, 塞一个 fill 进去既不生效(渲染分支
+   * 不读它)又会在数据里留一个假字段, 将来若加了"导出摆位 JSON"这类
+   * 功能就会把它当真值用。
+   */
   const recolorSelected = (fill: string) => {
-    if (!selectedSticker) return;
+    if (!selectedSticker || isAssetSticker(selectedSticker)) return;
     const next = stickers.slice();
     next[selected] = { ...selectedSticker, fill };
     onChange(next);
@@ -411,60 +545,105 @@ export function StickerEditor({
       {/* 形状工具条。放画布内而不是模态顶部: 摆放是"看着照片点"的动作,
           工具条离点按位置越近, 视线来回扫动的距离越短。 */}
       {showToolbar && (
-        <div className="absolute left-2 top-2 flex flex-wrap gap-1">
-          <button
-            type="button"
-            data-sticker-tool="select"
-            aria-pressed={tool === "select"}
-            onClick={() => setTool("select")}
-            className={`rounded-full px-2 py-1 text-[10px] shadow transition ${
-              tool === "select" ? "bg-brick text-white" : "bg-white/90 text-brown"
-            }`}
-          >
-            拖动
-          </button>
-          {STICKER_SHAPE_KEYS.map((k) => (
+        <div className="absolute left-2 top-2 flex max-w-[calc(100%-1rem)] flex-col gap-1">
+          <div className="flex flex-wrap gap-1">
             <button
-              key={k}
               type="button"
-              data-sticker-shape={k}
-              aria-pressed={tool === k}
-              onClick={() => setTool(k)}
+              data-sticker-tool="select"
+              aria-pressed={tool === "select"}
+              onClick={() => setTool("select")}
               className={`rounded-full px-2 py-1 text-[10px] shadow transition ${
-                tool === k ? "bg-brick text-white" : "bg-white/90 text-brown"
+                tool === "select" ? "bg-brick text-white" : "bg-white/90 text-brown"
               }`}
             >
-              {STICKER_SHAPE_NAMES[k]}
+              拖动
             </button>
-          ))}
+            {STICKER_SHAPE_KEYS.map((k) => (
+              <button
+                key={k}
+                type="button"
+                data-sticker-shape={k}
+                aria-pressed={tool === k}
+                onClick={() => setTool(k)}
+                className={`rounded-full px-2 py-1 text-[10px] shadow transition ${
+                  tool === k ? "bg-brick text-white" : "bg-white/90 text-brown"
+                }`}
+              >
+                {STICKER_SHAPE_NAMES[k]}
+              </button>
+            ))}
+          </div>
+          {/*
+            位图素材行。与代码形状分开一行而不是混排: 素材有缩略图
+            (能看出长什么样), 形状只有文字名, 混在一起视觉密度不一致且
+            不好找分隔。素材为空(manifest 加载失败)时整行不渲染 ——
+            留一条空白行只会在画布上凭空多出一条无内容的带子。
+          */}
+          {assets.length > 0 && (
+            <div
+              data-sticker-assets=""
+              className="flex max-w-[min(28rem,60vw)] flex-wrap gap-1"
+            >
+              {assets.map((a) => (
+                <button
+                  key={a.key}
+                  type="button"
+                  data-sticker-asset={a.key}
+                  aria-pressed={tool === a.key}
+                  aria-label={`贴纸素材 ${a.name}`}
+                  title={a.name}
+                  onClick={() => setTool(a.key)}
+                  className={`h-7 w-7 overflow-hidden rounded-full border-2 shadow transition ${
+                    tool === a.key ? "border-brick scale-110" : "border-white"
+                  }`}
+                >
+                  <img
+                    src={a.src}
+                    alt=""
+                    draggable={false}
+                    loading="lazy"
+                    decoding="async"
+                    className="h-full w-full object-contain"
+                  />
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {/* 色板 + 选中贴纸的微调(旋转/换色/删除)。同样贴画布内。 */}
       {showToolbar && (
         <div className="absolute right-2 top-2 flex flex-col items-end gap-1">
-          <div className="flex flex-wrap justify-end gap-1">
-            {STICKER_COLORS.map((c) => (
-              <button
-                key={c.color}
-                type="button"
-                data-sticker-color={c.color}
-                onClick={() => {
-                  setColor(c.color);
-                  recolorSelected(c.color);
-                }}
-                aria-pressed={selectedSticker?.fill === c.color}
-                aria-label={`贴纸颜色 ${c.name}`}
-                title={c.name}
-                style={{ background: c.color }}
-                className={`h-5 w-5 rounded-full border-2 transition ${
-                  selectedSticker?.fill === c.color
-                    ? "border-brick scale-110"
-                    : "border-white"
-                }`}
-              />
-            ))}
-          </div>
+          {/*
+            色板。选中位图贴纸时整块隐藏 —— PNG 自带颜色, 改不了;
+            留一排点不亮的色块比不给更让人困惑(用户会以为素材染色坏了)。
+            未选中时仍显示, 因为它同时是"**接下来**要摆的贴纸"用的颜色。
+          */}
+          {(!selectedSticker || !isAssetSticker(selectedSticker)) && (
+            <div className="flex flex-wrap justify-end gap-1">
+              {STICKER_COLORS.map((c) => (
+                <button
+                  key={c.color}
+                  type="button"
+                  data-sticker-color={c.color}
+                  onClick={() => {
+                    setColor(c.color);
+                    recolorSelected(c.color);
+                  }}
+                  aria-pressed={stickerFill(selectedSticker) === c.color}
+                  aria-label={`贴纸颜色 ${c.name}`}
+                  title={c.name}
+                  style={{ background: c.color }}
+                  className={`h-5 w-5 rounded-full border-2 transition ${
+                    stickerFill(selectedSticker) === c.color
+                      ? "border-brick scale-110"
+                      : "border-white"
+                  }`}
+                />
+              ))}
+            </div>
+          )}
           {selectedSticker && (
             <div className="flex items-center gap-1 rounded-full bg-white/90 px-1.5 py-1 shadow">
               <span className="text-[10px] text-brown" data-sticker-selected-rot="">

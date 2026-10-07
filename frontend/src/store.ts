@@ -32,6 +32,14 @@ export interface CaptureState {
   aiEnabled: boolean;
   aiImages: string[];
   layoutUrl: string | null;
+  /**
+   * 分享卡的**服务端** URL(/outputs/{job_id}/share.jpg), 非 blob。
+   *
+   * 刻意与 layoutUrl 分开存而不是复用: layoutUrl 在非 AI 路径下曾长期是
+   * blob: URL(刷新即失效), 分享卡则一定是落盘后的服务端路径。混在一处
+   * 会让「这个 URL 刷新后还在吗」变成一个每次都要重新判断的问题。
+   */
+  shareUrl: string | null;
   // 取景框实时预览需要相框/滤镜的完整参数(css、vignette、pad...).
   // HomePage 拉到 /api/meta 后写进这里, DecoratePage 直接复用, 不再重复请求。
   frameMeta: Record<string, FrameInfo>;
@@ -53,6 +61,9 @@ export interface CaptureState {
    * 靠 useEffect 手动清理, 漏一次就会出现"上一轮的笔迹烧进这一轮的照片"。
    */
   doodles: DoodlesByIndex;
+  /** pose 浮层是否可见。默认开, 是 UI 偏好, reset 不清。 */
+  showPose: boolean;
+  setShowPose: (v: boolean) => void;
   /**
    * 每张照片**额外**摆放的贴纸, key 是 frames 数组下标。
    *
@@ -73,6 +84,7 @@ export interface CaptureState {
   setAiEnabled: (v: boolean) => void;
   setAiImages: (imgs: string[]) => void;
   setLayoutUrl: (u: string | null) => void;
+  setShareUrl: (u: string | null) => void;
   setFrameMeta: (m: FrameInfo[]) => void;
   setFilterMeta: (m: FilterInfo[]) => void;
   setMaskPreview: (v: boolean) => void;
@@ -104,10 +116,12 @@ export const useStore = create<CaptureState>((set) => ({
   aiEnabled: false,
   aiImages: [],
   layoutUrl: null,
+  shareUrl: null,
   frameMeta: {},
   filterMeta: {},
   maskPreview: true,
   showGuides: true,
+  showPose: true,
   maskKey: "heart",
   maskGalleryOpen: false,
   doodles: {},
@@ -121,10 +135,12 @@ export const useStore = create<CaptureState>((set) => ({
   setAiEnabled: (v) => set({ aiEnabled: v }),
   setAiImages: (imgs) => set({ aiImages: imgs }),
   setLayoutUrl: (u) => set({ layoutUrl: u }),
+  setShareUrl: (u) => set({ shareUrl: u }),
   setFrameMeta: (m) => set({ frameMeta: toMap(m) }),
   setFilterMeta: (m) => set({ filterMeta: toMap(m) }),
   setMaskPreview: (v) => set({ maskPreview: v }),
   setShowGuides: (v) => set({ showGuides: v }),
+  setShowPose: (v) => set({ showPose: v }),
   setMaskKey: (v) => set({ maskKey: v }),
   setMaskGalleryOpen: (v) => set({ maskGalleryOpen: v }),
   setDoodles: (idx, strokes) => set((s) => ({ doodles: { ...s.doodles, [idx]: strokes } })),
@@ -163,6 +179,7 @@ export const useStore = create<CaptureState>((set) => ({
       currentJobId: null,
       aiImages: [],
       layoutUrl: null,
+      shareUrl: null,
       doodles: {},
       stickerOverrides: {},
     }),

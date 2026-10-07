@@ -9,6 +9,7 @@
  *   3. 各标签页数量正确:无=1项,单人=9,双人=6
  */
 import { chromium } from "playwright";
+import { burstTo } from "./maskBurstHelper.mjs";
 
 const URL = process.env.APP_URL || "http://localhost:5173/home";
 const PASS = [];
@@ -143,7 +144,7 @@ await page.locator('[data-tab="dual"]').click();
 await page.waitForTimeout(500);
 await page.evaluate(() => window.__store.getState().setFrames([]));
 await page.keyboard.press("Space");
-await page.waitForFunction(() => window.__store.getState().frames.length >= 4, { timeout: 60000 });
+await burstTo(page, 4);
 const ok = await page.evaluate(() => {
   const s = window.__store.getState();
   return { mask: s.maskKey, n: s.frames.length };

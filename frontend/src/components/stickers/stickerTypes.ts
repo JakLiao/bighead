@@ -19,16 +19,20 @@
  *    **确定性**的(不含 Math.random)。在这里另写一份几何公式必然漂移:
  *    蒙版预览、蒙版出片、贴纸编辑器、贴纸烧录四处会画出四种不同的星星。
  *
+ * 4. **代码形状与位图素材共用一套摆放管线。**
+ *    StickerPlacement 是判别联合: 带 shape 走 Path2D, 带 asset 走 drawImage,
+ *    但 x/y/size/rotation/opacity 的语义、叠放顺序、命中测试、选中框、
+ *    烧录出口全部一致。新增位图素材**不需要**在渲染器里加第三条分支 ——
+ *    只有 paintSticker 内部有 shape/asset 之分, 其它每一处都当它是同一种东西。
+ *
  * 与涂鸦层的分工: 蒙版(mask)里的贴纸是 maskDefs 硬编码的**取景期**装饰,
  * 走 renderMask 的旧路径; 这里管的是用户在排版页**额外**摆的贴纸, 两者
  * 互不影响。
  */
 import type { StickerShapeKey } from "../masks/geometry";
 
-/** 一个用户摆放的贴纸。x/y/size 全部相对照片, 0..1。 */
-export interface StickerPlacement {
-  /** 形状 key。与 masks/geometry.ts 的 STICKER_SHAPES 同源。 */
-  shape: StickerShapeKey;
+/** 摆放参数的公共部分。x/y/size 的语义见文件头的不变量 1、2。 */
+interface StickerPlacementBase {
   /** 中心 x, 相对照片宽, 0..1。 */
   x: number;
   /** 中心 y, 相对照片高, 0..1。 */
@@ -37,14 +41,60 @@ export interface StickerPlacement {
   size: number;
   /** 旋转角度(度)。顺时针为正, 与 canvas 的 rotate 一致。 */
   rotation: number;
+  /** 不透明度, 缺省 1。 */
+  opacity?: number;
+}
+
+/**
+ * 代码形状贴纸(内置 7 选 1)。
+ *
+ * 走 Path2D.fill/stroke, 颜色由 fill 决定。
+ */
+export interface ShapeSticker extends StickerPlacementBase {
+  /** 形状 key。与 masks/geometry.ts 的 STICKER_SHAPES 同源。 */
+  shape: StickerShapeKey;
   /** 填充色(CSS 颜色串)。 */
   fill: string;
   /** 描边色。缺省不描边。 */
   stroke?: string;
   /** 描边宽度, 单位与 size 同基准(相对短边)。 */
   strokeWidth?: number;
-  /** 不透明度, 缺省 1。 */
-  opacity?: number;
+  /** 位图贴纸专用字段。显式声明为 never, 让"既有 shape 又有 asset"在
+   * 编译期就是非法的 —— 而不是一个运行时才被渲染器忽略的坏数据。 */
+  asset?: never;
+}
+
+/**
+ * 位图贴纸(public/stickers/ 下登记的 PNG)。
+ *
+ * 走 drawImage, **没有 fill**: PNG 自带颜色, 染色需要滤镜管线, 而滤镜是在
+ * 贴纸之后才跑的(见 DecoratePage), 顺序不能倒 —— 否则预览和成片会不一致。
+ * 同一个 key 的 PNG 只有一种样子, 这是刻意的: 素材的辨识度就来自原图。
+ */
+export interface AssetSticker extends StickerPlacementBase {
+  /** 素材 key, 对应 stickerLibrary 加载的 manifest 条目。 */
+  asset: string;
+  /** 代码形状专用字段。见 ShapeSticker.asset 的说明。 */
+  shape?: never;
+}
+
+/**
+ * 一个用户摆放的贴纸。x/y/size 全部相对照片, 0..1。
+ *
+ * 判别方式是**看哪个 key 存在**(shape 还是 asset), 而非再加一个 kind 字段:
+ * 多一个判别位就多一处可能与实际内容不一致的状态(placement.kind==="asset"
+ * 但 asset 是 undefined), 而"存在哪个 key"无法被人为写歪。
+ */
+export type StickerPlacement = ShapeSticker | AssetSticker;
+
+/** 是否是位图贴纸。渲染与命中测试的分支依据。 */
+export function isAssetSticker(s: StickerPlacement): s is AssetSticker {
+  return typeof (s as AssetSticker).asset === "string";
+}
+
+/** 是否是代码形状贴纸。 */
+export function isShapeSticker(s: StickerPlacement): s is ShapeSticker {
+  return typeof s.shape === "string";
 }
 
 /**
@@ -105,5 +155,26 @@ export const STICKER_COLORS: StickerColorDef[] = [
 /** 新贴纸的默认边长(相对短边)。0.16 ≈ 4:3 画幅下的 1/6 宽, 是个不遮挡主体的大小。 */
 export const STICKER_DEFAULT_SIZE = 0.16;
 
+/**
+ * 位图贴纸的默认边长(相对短边)。
+ *
+ * 比代码形状大一圈: 代码形状是"规整的形", 视觉重量轻; 位图素材带模切
+ * 白边和插画细节, 同样的边长摆出来明显更小一号。
+ */
+export const ASSET_STICKER_DEFAULT_SIZE = 0.22;
+
 /** 新贴纸的默认颜色。用色板第一色, 不另立常量, 免得两处默认值漂移。 */
 export const STICKER_DEFAULT_COLOR = STICKER_COLORS[0].color;
+
+/**
+ * 安全读取填充色。位图贴纸没有 fill(见 AssetSticker), UI 上的色板选中态
+ * 与"改色"操作都要过这里, 而不是直接 `s.fill` ——
+ * 联合类型下直接访问非公共字段是编译错误, 用 `in` 收窄则要在每个调用点
+ * 重复一遍判别。集中在这里, 判别只写一次。
+ *
+ * 接受 null: 调用点通常是"当前选中的贴纸"(可能没选), 用 `s!.fill` 硬解
+ * 只会把一个可空值伪装成非空, 免去调用点的 `!` 又不改变运行时行为。
+ */
+export function stickerFill(s: StickerPlacement | null): string | undefined {
+  return s && isShapeSticker(s) ? s.fill : undefined;
+}

@@ -19,8 +19,13 @@ interface Props {
 }
 
 export function CountdownOverlay({ tick, onComplete, stepMs = 900, from = 3 }: Props) {
+  // 本组件的本地态完全由「父组件给的 key={tick}」决定, 不在 effect 里同步重置。
+  //
+  // 原来在 effect 开头 setN(from) / setActive(true): 那是「用 effect 派生状态」,
+  // 会多一帧旧值, 也触发 react-hooks/set-state-in-effect。改成由父组件传
+  // key={tick} 后, tick 一变 React 直接重挂载, useState(from) 天然就是新起点,
+  // 语义相同但没有中间帧 —— 倒计时数字不会再闪一下上一轮的残留值。
   const [n, setN] = useState<number>(from);
-  const [active, setActive] = useState(false);
   // onComplete 走 ref 而不是进依赖数组: 它每次渲染都是新函数(父组件里是内联
   // 箭头函数), 若直接进依赖, 倒计时 effect 会被父组件的任意重渲染打断重启。
   // 这里只在挂载时读一次最新引用 —— 语义上等价于"调用时拿当前回调",
@@ -36,23 +41,20 @@ export function CountdownOverlay({ tick, onComplete, stepMs = 900, from = 3 }: P
     if (tick <= 0) return;
     let count = from;
     let timer = 0;
-    setN(count);
-    setActive(true);
     const tickOnce = () => {
       count--;
+      setN(count);
       if (count <= 0) {
-        setActive(false);
         onCompleteRef.current();
         return;
       }
-      setN(count);
       timer = window.setTimeout(tickOnce, stepMs);
     };
     timer = window.setTimeout(tickOnce, stepMs);
     return () => clearTimeout(timer);
   }, [tick, from, stepMs]);
 
-  if (!active || n <= 0) return null;
+  if (tick <= 0 || n <= 0) return null;
   return (
     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
       <div

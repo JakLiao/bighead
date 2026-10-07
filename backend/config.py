@@ -52,8 +52,25 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# 复用 webui 的模型仓库(用户指定)
-MODEL_BASE = Path(r"E:\Code\stable-diffusion-webui\models")
+# 贴纸册元数据 sidecar。下划线开头是有意为之:
+# gallery.py 的目录扫描以 _ 或 . 开头的名字作为内部目录/文件跳过,
+# 这样 _album.json 既能被 ALBUM 路径找到, 又不会被列进 /api/gallery 的 items。
+ALBUM_FILENAME = "_album.json"
+ALBUM_MAX_TITLE = 64      # 标题字节数上限
+ALBUM_MAX_NOTE = 280      # 备注字节数上限
+ALBUM_MAX_TAG = 16        # 单标签字节数上限
+ALBUM_MAX_TAGS = 8        # 标签数量上限
+
+# 复用 webui 的模型仓库(用户指定)。
+# 支持 BIGHEAD_MODEL_BASE 覆盖: 换机器 / 换盘时不必改代码。
+# 之前这个字面路径散落在 config / qwen_worker / pipeline 三处, 改一处漏两处,
+# 且 scripts/ 下还有 11 个一次性脚本各自抄了一份。
+MODEL_BASE = Path(
+    os.environ.get("BIGHEAD_MODEL_BASE", r"E:\Code\stable-diffusion-webui\models")
+)
+# webui 仓库根(不是 models/)。SDXL 的 original_config yaml 在它下面,
+# 以前是 pipeline.py 里又写了一遍字面路径。
+WEBUI_ROOT = MODEL_BASE.parent
 
 # SDXL 路线(AI 写真默认)
 SDXL_CKPT = MODEL_BASE / "checkpoints" / "人像-XL-asian aesthetics（亚洲美学XL）_v2.0.safetensors"
@@ -187,6 +204,46 @@ SD15_ENABLED = False
 PHOTO_FILENAME = "photo_{idx}.jpg"
 LAYOUT_FILENAME = "layout.jpg"
 AI_FILENAME = "ai_{idx}.jpg"
+# 分享卡(4:3 成品, 含品牌 footer)。与 layout.jpg 平级 —— layout 是
+# 「拼图原样」, share 是「可直接发出去的成品」, 两者都要留。
+SHARE_FILENAME = "share.jpg"
+
+# 分享卡几何(固定 4:3, 150 DPI -> 1200x900 = 8x6 英寸)。
+#
+# 为什么固定比例而不跟随排版: 分享卡要发到社交平台, 比例不统一会导致
+# 版式碎裂。排版本身有 2x2(接近 1:1)、strip(4:1 极端横长)等多种比例,
+# 全部塞进同一个 4:3 画布 —— 长条会在上下留大片空白, 方形会在左右留白。
+# 这是刻意接受的代价: 一致的对外形态 > 画面填满。
+#
+# 内容区与页脚区的高度是按 4:3 反推的: 900 - 220(footer) = 680,
+# 减去上下各 40 边距 = 600 给画面。
+#
+# 镜像常量在 frontend/src/shareCard.ts。**两处必须逐值一致** ——
+# 前端那份用于日常出片, 这份用于补生成历史卡片, 独立实现同一个设计时
+# 不一致只有肉眼能发现。
+SHARE_CARD_SIZE = (1200, 900)
+SHARE_CARD_BG = (255, 248, 240)     # 与 layouts.py 的纸底同色
+SHARE_CARD_MARGIN = 40
+SHARE_CARD_FOOTER_H = 220
+# 品牌行文案。footer = 品牌行 + 短 job ID + 拍摄日期。
+SHARE_CARD_BRAND = "BigHead 大头贴复古"
+# 短 job ID 取前几位。6 位是在「卡片上不喧宾夺主」与「够口头指认某一张」
+# ("你那张 c3f1a9 的")之间的取舍。
+SHARE_CARD_SHORT_ID = 6
+# 中文字体候选链, 按优先级探测。msyh.ttc(微软雅黑)是 Windows 自带且
+# 字形最稳; simhei.ttf 次之。
+#
+# arial.ttf 排在候选链之后而不是链首: PIL 遇到字体里没有的字形**不会抛
+# 异常**, 它会画出 .notdef(空心方框)。若只写「找不到就用 arial」, 结果是
+# 一张排版看起来完全正常、但品牌行是三个豆腐块的图, 且没有任何报错。
+# 这类静默失败最难在测试里发现, 所以链首必须是真正含中文字形的字体。
+SHARE_CARD_FONTS = [
+    r"C:\Windows\Fonts\msyh.ttc",
+    r"C:\Windows\Fonts\simhei.ttf",
+    r"C:\Windows\Fonts\msyhbd.ttc",
+]
+# 纯 ASCII 兜底(至少让 job_id 正常显示)。中文在它下面必然是豆腐块。
+SHARE_CARD_FONT_FALLBACK = r"C:\Windows\Fonts\arial.ttf"
 
 # ----------------------------------------------------------------------------
 # 风格预设(AI 写真提示词)

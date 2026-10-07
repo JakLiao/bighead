@@ -13,6 +13,9 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend/.npmcache/
+# npm 的本地缓存目录。sandbox 下 npm 无法写 %LOCALAPPDATA% 时会退到
+# 项目根建这个, 与已有的 frontend/.npmcache/ 是同一类东西。
+.npm-cache/
 frontend/tsconfig.tsbuildinfo
 *.tsbuildinfo
 
@@ -55,6 +58,10 @@ venv/
 
 # 蒙版素材校验脚本的产物(contact sheet),preview_samples.py 每次重生成
 scripts/mask_assets/preview.png
+
+# 临时工作目录(手工调试时的草稿/截图)。.tmp/ 不是 .gitignore 的默认规则,
+# 显式列出以免漏掉根目录与任意层级的同名目录。
+.tmp/
 
 # IDE
 .vscode/

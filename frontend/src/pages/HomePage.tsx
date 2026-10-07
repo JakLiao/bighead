@@ -9,10 +9,13 @@ import { FrameStrip } from "../components/FrameStrip";
 import { MaskStrip } from "../components/MaskStrip";
 import { MaskGallery } from "../components/MaskGallery";
 import { getImageMasks, loadMaskManifest } from "../components/masks/maskLibrary";
+import { PoseHint } from "../components/retake/PoseHint";
+import { RetakeBar } from "../components/retake/RetakeBar";
 import { fetchMeta } from "../api";
 import type { FilterInfo, FrameInfo } from "../types";
 
 const PHOTO_COUNT = 4;
+const POSES = ["嘟嘴", "比心", "看镜头", "笑僵"] as const;
 
 /**
  * 稳定引用占位。LiveCamera 包了 memo, 若这里传内联箭头函数, 每次渲染都是
@@ -34,6 +37,9 @@ export function HomePage() {
   const setMaskPreview = useStore((s) => s.setMaskPreview);
   const showGuides = useStore((s) => s.showGuides);
   const setShowGuides = useStore((s) => s.setShowGuides);
+  const showPose = useStore((s) => s.showPose);
+  const setShowPose = useStore((s) => s.setShowPose);
+  const [retakeIdx, setRetakeIdx] = useState<number | null>(null);
   const setFrameMeta = useStore((s) => s.setFrameMeta);
   const setFilterMeta = useStore((s) => s.setFilterMeta);
   const maskKey = useStore((s) => s.maskKey);
@@ -58,6 +64,9 @@ export function HomePage() {
   // 摄像头检不到帧时的连续重试次数。与已拍张数是两个独立语义。
   // 用 ref: 只在 doSnap 内做判断, 不参与渲染。
   const retryRef = useRef(0);
+  // 重拍时把"下一张插入哪个 idx"传给 doSnap。不需要触发渲染, 只在
+  // doSnap 调用时读一次后清空, 避免泄露到后续拍第 5 张的追加路径。
+  const insertAtRef = useRef<number | null>(null);
 
   // 摄像头拍照能力。通过 ref 显式取用,而不是去读组件的静态属性。
   const camRef = useRef<LiveCameraHandle>(null);
@@ -125,10 +134,14 @@ export function HomePage() {
   function startCapture() {
     if (capturing) return;
     setCapturing(true);
+    // 显式重置 retakeIdx: 新一轮连拍不能继承上一轮遗留的暂停态。
+    // reset() 只清 store 里的连拍产物, HomePage 局部 state 不归它管。
+    setRetakeIdx(null);
     // reset() 会清掉上一轮的 aiImages / layoutUrl / currentJobId —— 之前
     // 这些跨路由永久驻留, 连拍两轮后 DecoratePage 可能显示上一次的 AI 成片。
     reset();
     retryRef.current = 0;
+    insertAtRef.current = null;
     setSnapTick((t) => t + 1);
   }
 
@@ -155,14 +168,46 @@ export function HomePage() {
     timers.current.push(window.setTimeout(() => setFlash(false), 250));
     // burnedIn 取此刻的 maskPreview 快照: snap() 里已按这个值把滤镜
     // 烧进像素, 之后用户再怎么改开关都不影响这张成片。
-    const next = [...frames, { url, burnedIn: maskPreview }];
+    // 包括「重拍本张」 —— 重拍就是再调一次 doSnap, 自然读到当下的 maskPreview,
+    // 语义与首拍一致, 不用额外处理。
+    // 重拍时把新片插回原 idx; 普通路径追加到末尾。读完 insertAt 立刻清空,
+    // 避免「retake 路径改完后忘了复位」导致下次拍第 5 张时插到错位置。
+    const insertAt = insertAtRef.current;
+    insertAtRef.current = null;
+    const next =
+      insertAt !== null
+        ? [
+            ...frames.slice(0, insertAt),
+            { url, burnedIn: maskPreview },
+            ...frames.slice(insertAt),
+          ]
+        : [...frames, { url, burnedIn: maskPreview }];
     setFrames(next);
     if (next.length >= PHOTO_COUNT) {
+      // 第 4 张直通 decorate —— RetakeBar 只在 idx < PHOTO_COUNT - 1 时出现。
       setCapturing(false);
+      setRetakeIdx(null);
       timers.current.push(window.setTimeout(() => nav("/decorate"), 400));
     } else {
-      setSnapTick((t) => t + 1);
+      // 前 3 张拍完进入暂停: 用户在 RetakeBar 上点「重拍本张」或「继续」。
+      // 不再像旧版那样 setSnapTick++ 自动进下一张。
+      setRetakeIdx(next.length - 1);
     }
+  }
+
+  function handleRetakePick(mode: "retake" | "continue") {
+    if (retakeIdx === null) return;
+    if (mode === "retake") {
+      // 丢掉 retakeIdx 位置的照片, 重拍这一张。
+      // insertAtRef 告诉 doSnap 把新片插回原 idx(而不是追加到末尾);
+      // setSnapTick++ 触发新一轮 3-2-1 倒计时。丢弃的 url 是 dataURL,
+      // 由浏览器在卸载时自动释放 —— 不需要也不应该手动 revoke。
+      setFrames(frames.filter((_, i) => i !== retakeIdx));
+      insertAtRef.current = retakeIdx;
+    }
+    // continue: frames 保持不变, 倒计时启动 → doSnap 追加一张。
+    setRetakeIdx(null);
+    setSnapTick((t) => t + 1);
   }
 
   return (
@@ -191,8 +236,20 @@ export function HomePage() {
           maskPreview={maskPreview}
           showGuides={showGuides}
         />
-        <CountdownOverlay tick={snapTick} onComplete={doSnap} />
+        <CountdownOverlay key={snapTick} tick={snapTick} onComplete={doSnap} />
         <ShutterFlash show={flash} />
+        <PoseHint
+          pose={POSES[frames.length % POSES.length]}
+          visible={showPose && capturing}
+        />
+        {retakeIdx !== null && (
+          <RetakeBar
+            previewUrl={frames[retakeIdx]?.url ?? null}
+            photoNumber={retakeIdx + 1}
+            total={PHOTO_COUNT}
+            onPick={handleRetakePick}
+          />
+        )}
       </div>
 
       {/* 蒙版开关:默认开启,拍前即可见相框/色调/构图引导 */}
@@ -214,6 +271,15 @@ export function HomePage() {
             className="w-4 h-4 accent-brick"
           />
           构图引导线
+        </label>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showPose}
+            onChange={(e) => setShowPose(e.target.checked)}
+            className="w-4 h-4 accent-brick"
+          />
+          pose 文字提示
         </label>
         <span className="text-brown/50">
           {maskPreview ? "所见即所得：拍下即成片" : "已关闭：拍摄原始画面"}
