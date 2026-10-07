@@ -146,28 +146,38 @@ try {
   });
   check("PATCH 不存在的 job 返回 404", nf === 404, `got ${nf}`);
 
-  // ---- DELETE 真删 ----
+  // ---- DELETE 软删除(默认) ----
+  // 原注释写的是「真删」。删除已改成**默认进回收站**, 所以这里的断法要跟着变:
+  // 目录离开 outputs/ 就算删成功(可恢复性由 verify-gallery-trash.mjs 专门覆盖)。
   const del = await page.evaluate(async (jid) => {
     const r = await fetch(`/api/gallery/${jid}`, { method: "DELETE" });
     return { status: r.status, body: await r.json().catch(() => null) };
   }, jidA);
   check("DELETE 返回 200", del.status === 200, `got ${del.status}`);
   check("DELETE 回显 deleted:true", del.body?.deleted === true);
+  check("DELETE 默认非永久(进回收站)", del.body?.permanent === false);
 
   const after = await page.evaluate(async () => (await fetch("/api/gallery")).json());
   check("GET 不再含已删条目", !after.items.find((x) => x.job_id === jidA));
   check("DELETE 后仍保留其他条目", !!after.items.find((x) => x.job_id === jidB));
 
-  // 删一次再删 → 404
+  // 删一次再删 → 404(目录已不在 outputs/)
   const del2 = await page.evaluate(async (jid) => {
     const r = await fetch(`/api/gallery/${jid}`, { method: "DELETE" });
     return r.status;
   }, jidA);
   check("重复 DELETE 返回 404", del2 === 404, `got ${del2}`);
-} finally {
-  // 清理自己造的 B
+
+  // 清掉刚软删进去的 A, 否则会留在回收站里变成下一次运行的噪声
   await page.evaluate(async (jid) => {
-    await fetch(`/api/gallery/${jid}`, { method: "DELETE" }).catch(() => {});
+    await fetch(`/api/gallery/trash/${jid}/purge`, { method: "POST" }).catch(() => {});
+  }, jidA);
+} finally {
+  // 清理自己造的 B。
+  // 必须带 permanent=true: 删除默认是软删除, 否则 B 会留在回收站里,
+  // 变成下一次运行时列表里的噪声。
+  await page.evaluate(async (jid) => {
+    await fetch(`/api/gallery/${jid}?permanent=true`, { method: "DELETE" }).catch(() => {});
   }, jidB);
   await browser.close();
 }

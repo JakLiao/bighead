@@ -257,7 +257,7 @@ try {
   for (const jid of [jidA, jidB, jidC]) {
     await page
       .evaluate(async (j) => {
-        await fetch(`/api/gallery/${j}`, { method: "DELETE" }).catch(() => {});
+        await fetch(`/api/gallery/${j}?permanent=true`, { method: "DELETE" }).catch(() => {});
       }, jid)
       .catch(() => {});
   }

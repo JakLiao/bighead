@@ -130,24 +130,107 @@ try {
   const starAfter = await page.locator(starSel).count();
   check("取消收藏后徽标消失", starAfter === starCount - 1, `${starCount} -> ${starAfter}`);
 
-  // ---- 6) 删除两段式 ----
+  // ---- 6) 删除确认弹窗 ----
   await page.locator("button.relative").first().click();
   await page.waitForSelector('[data-testid="album-edit-title"]', { state: "visible", timeout: 5000 });
+  // 先在标题框里改一个**非空**的新标题。只有非空才验得住"编辑还在" ——
+  // 对着空输入框断言非空, 失败时说不清是丢数据还是本来就没内容。
+  const DRAFT = "待保存的标题";
+  await page.locator("[data-album-title]").fill(DRAFT);
   await page.click("button:has-text('删除这条')");
-  await page.waitForSelector("button:has-text('确认删除')", { timeout: 3000 });
-  check("二次确认按钮出现", await page.locator("button:has-text('确认删除')").isVisible());
-  await page.click("button:has-text('确认删除')");
+  /**
+   * 断**data 属性**而不是按钮文案。
+   *
+   * 早先这里用 `button:has-text('确认删除')`, 而软删除把文案改成了
+   * "移到回收站" —— 于是这个脚本整个崩在 waitForSelector 超时上, 报一个
+   * 与"编辑功能坏了"毫不相干的错。文案是给人看的, 会改; data 属性是
+   * 给测试的契约, 不该跟着文案一起变。
+   *
+   * 同样的教训在本轮又用上一次: 二次确认从"按钮变色"改成了**弹窗**,
+   * 契约属性随之从 data-album-delete-confirm 变成 data-confirm-dialog。
+   * 断属性而不是断结构, 才让这次改动只改一行就完事。
+   */
+  await page.waitForSelector('[data-confirm-dialog="album"]', { timeout: 3000 });
+  check(
+    "二次确认弹窗出现",
+    await page.locator('[data-confirm-dialog="album"]').isVisible(),
+  );
+  // 弹窗必须盖在编辑抽屉之上。两层都是 z-50, 靠 DOM 顺序决定 ——
+  // 所以这里直接问"用户看到的是谁": 取弹窗中心那个点, 看命中的元素
+  // 属于谁。
+  //
+  // (早先这里写的是 compareDocumentPosition 与标题比, 方向弄反了:
+  // 标题在弹窗**之前**, 断言却要求它 FOLLOWING。这类"钉错了方向"的
+  // 断言比没有断言更糟 —— 它会一直红, 逼人学会忽略它。)
+  const onTop = await page.evaluate(() => {
+    const d = document.querySelector('[data-confirm-dialog="album"]');
+    if (!d) return "missing";
+    const r = d.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return d.contains(hit) ? "ok" : `under:${hit?.tagName ?? "null"}`;
+  });
+  check("确认弹窗盖在编辑抽屉之上", onTop === "ok", String(onTop));
+
+  /**
+   * Esc 只该关弹窗, **不该连带关掉整个抽屉**。
+   *
+   * 这条钉的是本轮修掉的一个真实缺陷: AlbumEditor 自己的 useEscape 挂
+   * 在 document 上, ConfirmDialog 内部也挂了一个, 两个都会响应同一次
+   * 按键 -> "按 Esc 取消删除"变成"取消删除 + 丢掉未保存的编辑"。
+   *
+   * 之所以隐蔽: 抽屉里通常有用户刚改的标题/标签, 丢掉了不会有任何报错,
+   * 表现为"我明明改了标题, 保存后还是旧的"。所以必须用"抽屉是否还在"
+   * 来判, 而不是只看弹窗关没关。
+   */
+  await page.keyboard.press("Escape");
+  await page.waitForSelector('[data-confirm-dialog="album"]', {
+    state: "detached",
+    timeout: 3000,
+  });
+  check("Esc 关掉了确认弹窗", (await page.locator('[data-confirm-dialog="album"]').count()) === 0);
+  check(
+    "Esc 没有连带关掉编辑抽屉",
+    (await page.locator('[data-testid="album-edit-title"]').count()) === 1,
+  );
+  check(
+    "抽屉里未保存的编辑还在",
+    (await page.locator("[data-album-title]").inputValue()) === DRAFT,
+    await page.locator("[data-album-title]").inputValue(),
+  );
+  // 取消删除后草稿必须还在, 否则那个"保存"按钮点下去也来不及 ——
+  // dirty 是相对抽屉打开那一刻的初始值算的, 草稿真丢了就变成"无改动"。
+  check(
+    "取消删除后仍处于已修改状态",
+    ((await page.locator("[data-album-save]").textContent()) || "").includes("保存"),
+    (await page.locator("[data-album-save]").textContent()) || "",
+  );
+
+  // 再打开一次, 走真正的删除路径。
+  await page.click("button:has-text('删除这条')");
+  await page.waitForSelector('[data-confirm-dialog="album"]', { timeout: 3000 });
+  await page.click('[data-confirm-ok="album"]');
   await page.waitForSelector('[data-testid="album-edit-title"]', { state: "detached", timeout: 5000 });
   check("删除后抽屉关闭", !(await page.locator('[data-testid="album-edit-title"]').count()));
+  check("删除后确认弹窗也关闭", !(await page.locator('[data-confirm-dialog="album"]').count()));
 
   const after = await page.evaluate(async () => (await fetch("/api/gallery")).json());
   check("后端列表不再含该 job", !after.items.find((x) => x.job_id === jid));
+  // 软删除的必然结果: 该 job 进了回收站而不是被物理清除。清掉它,
+  // 否则它会在回收站里留到下一次运行。
+  const trashed = await page.evaluate(
+    async (id) => (await fetch("/api/gallery/trash")).json().then((t) => t.items.some((x) => x.job_id === id)),
+    jid,
+  );
+  check("删除后进了回收站(软删除而非真删)", trashed);
+  await page.evaluate(async (id) => {
+    await fetch(`/api/gallery/trash/${id}/purge`, { method: "POST" });
+  }, jid);
 
   // ---- 7) 无 JS 错误 ----
   check("无未捕获 JS 异常", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally {
   await page.evaluate(async (j) => {
-    await fetch(`/api/gallery/${j}`, { method: "DELETE" }).catch(() => {});
+    await fetch(`/api/gallery/${j}?permanent=true`, { method: "DELETE" }).catch(() => {});
   }, jid);
   await browser.close();
 }

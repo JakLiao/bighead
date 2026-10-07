@@ -1,6 +1,8 @@
 import { useCallback, useState } from "react";
 import type { AlbumEntry } from "../../types";
+import { RETENTION_DAYS } from "../../types";
 import { useEscape } from "./useEscape";
+import { ConfirmDialog } from "../ConfirmDialog";
 
 // 与 backend/config.py 的 ALBUM_MAX_* 数值同步, 改一边要同步改另一边。
 const MAX_TITLE = 64;
@@ -42,6 +44,16 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
   const [pending, setPending] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  /**
+   * 确认态里显示的保留期提示。
+   *
+   * 天数是**从后端配置里抄过来的常量**而不是从接口拿: 回收站的列表接口
+   * 才有 retention_days, 而这里是删除前的瞬时提示, 为此多发一个请求不划算。
+   * 两者不一致的代价只是文案少写一个数字(仍会正确显示"移到回收站"),
+   * 而多一次请求会让确认态有可感知的延迟。
+   */
+  const RETENTION_HINT = `${RETENTION_DAYS} 天后可从回收站恢复`;
+
   function addTag(raw: string) {
     const t = raw.trim();
     if (!t) return;
@@ -71,10 +83,16 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
 
   // Esc 关闭。pending 期间不关: PATCH/DELETE 正在飞, 关掉抽屉会让用户
   // 以为操作没生效, 而后台其实已经把数据改了。
+  //
+  // **删除确认弹窗开着时必须让出Esc**: 这个 hook 挂的是 document, 而
+  // ConfirmDialog 内部也挂了一个。按一次 Esc 会让两个 handler 都跑,
+  // 于是 requestClose 把整个编辑抽屉关掉 —— "按 Esc 取消删除"就变成了
+  // "取消删除 + 顺带丢掉未保存的编辑"。这是很隐蔽的数据丢失路径:
+  // 用户只是想取消删除, 标题和标签的修改却一起没了。
   const requestClose = useCallback(() => {
     if (!pending) onClose();
   }, [pending, onClose]);
-  useEscape(requestClose);
+  useEscape(requestClose, !confirmDelete);
 
   async function handleSave() {
     setPending(true);
@@ -185,25 +203,22 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
         </label>
 
         <div className="flex gap-2">
-          {!confirmDelete ? (
-            <button
-              type="button"
-              onClick={() => setConfirmDelete(true)}
-              disabled={pending}
-              className="px-3 py-2 text-xs text-red-500 border border-red-300 rounded-full hover:bg-red-50"
-            >
-              删除这条
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={handleDelete}
-              disabled={pending}
-              className="px-3 py-2 text-xs bg-red-500 text-white rounded-full hover:bg-red-600"
-            >
-              确认删除? 不可恢复
-            </button>
-          )}
+          {/*
+            删除入口只负责打开确认弹窗, 不再有第二段按钮。
+
+            早先是"就地换成『移到回收站』" —— 那个变化太小, 用户常要点第二下
+            才发现自己在哪一步。现在由 ConfirmDialog 承接(批量删除那边同样
+            改成了弹窗, 两处必须一致, 否则同一种操作有两种心智模型)。
+          */}
+          <button
+            type="button"
+            onClick={() => setConfirmDelete(true)}
+            disabled={pending}
+            className="px-3 py-2 text-xs text-red-500 border border-red-300 rounded-full hover:bg-red-50 disabled:opacity-40"
+            data-album-delete=""
+          >
+            删除这条
+          </button>
           <div className="flex-1" />
           <button
             type="button"
@@ -226,6 +241,25 @@ export function AlbumEditor({ jobId, initial, onSave, onDelete, onClose }: Props
           </button>
         </div>
       </div>
+
+      {/*
+        删除确认弹窗。挂在**最外层遮罩里、内层卡片之外** —— 放错位置的话
+        它会继承卡片的 `max-w-md` 与 `stopPropagation`, 变成"卡片里又一张
+        卡片", 且点确认按钮不会触发遮罩的关闭逻辑。
+
+        层级: 本组件遮罩与 ConfirmDialog 都是 z-50, 靠 DOM 顺序决定 ——
+        弹窗在后面, 于是盖在编辑抽屉之上, 正是所需。
+      */}
+      <ConfirmDialog
+        open={confirmDelete && !pending}
+        title="移到回收站?"
+        message="将这条照片移到回收站。"
+        hint={RETENTION_HINT}
+        confirmLabel="移到回收站"
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setConfirmDelete(false)}
+        testId="album"
+      />
     </div>
   );
 }
