@@ -11,10 +11,46 @@
  * 否则会一直停在 1/4。这是计划内的行为变更, 不是回归。
  */
 import { chromium } from "playwright";
-import { existsSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BASE = process.env.APP_URL || "http://localhost:5173/home";
-const SHOT = "../outputs/_verify/burst.png";
+
+/**
+ * 截图落盘路径, 从**本文件位置**推导而不是靠 CWD。
+ *
+ * 早先写的是 "../outputs/_verify/burst.png" —— 它只在 CWD 恰好是
+ * frontend/ 时成立。从仓库根跑 `node frontend/verify-burst.mjs` 时,
+ * 截图会落到仓库根的 outputs/ 下(还不存在, 于是 Playwright 报错),
+ * 而真正的 outputs/_verify/ 里什么都没有。失败信息指向路径, 不指向
+ * "你在错误的目录里跑了我"这件真正的事。
+ *
+ * _verify 以下划线开头, 后端扫描时会跳过它, 所以它不会污染画廊 ——
+ * 这也是本脚本不需要 harness 的原因(它不造 job 数据)。
+ */
+const SHOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "outputs",
+  "_verify",
+  "burst.png",
+);
+
+/**
+ * playwright 是否可用。同样的理由: existsSync("node_modules/playwright")
+ * 依赖 CWD, 从仓库根跑会误判成"没装"从而静默 skip —— 一个从不执行的
+ * 验证脚本比失败的更危险。createRequire 以本文件为基准解析, 与 CWD 无关。
+ */
+function canResolvePlaywright() {
+  try {
+    createRequire(import.meta.url).resolve("playwright");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function log(...a) { console.log("  ", ...a); }
 
@@ -24,7 +60,7 @@ const button = (page) =>
   page.locator("button", { hasText: /拍摄中|开始连拍/ }).first();
 
 async function main() {
-  if (!existsSync("node_modules/playwright")) {
+  if (!canResolvePlaywright()) {
     console.log("  playwright 未安装,跳过");
     process.exit(0);
   }
@@ -90,6 +126,8 @@ async function main() {
     }
   }
 
+  // Playwright 不会自动创建截图的父目录, 目录不存在会直接抛 ENOENT
+  mkdirSync(path.dirname(SHOT), { recursive: true });
   await page.screenshot({ path: SHOT });
 
   console.log("");

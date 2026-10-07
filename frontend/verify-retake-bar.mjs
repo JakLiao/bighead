@@ -12,8 +12,28 @@
  * 用假摄像头 + 真实点击，不 mock store。
  */
 import { chromium } from "playwright";
+import { mkdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const URL = process.env.APP_URL || "http://localhost:5173/home";
+
+/**
+ * 截图落盘路径, 从本文件位置推导而不是靠 CWD。
+ *
+ * 早先写的是 "../outputs/_verify/retake-bar.png": 只在 CWD 恰好是
+ * frontend/ 时成立, 从仓库根跑会落到错误位置; 又因为外面套了
+ * .catch(() => {}), 失败还被完全吞掉 —— 脚本报告"通过", 截图根本没生成,
+ * 而这个截图恰恰是人工复看 pose/RetakeBar 布局的唯一凭据。
+ * 静默失败比没有截图更坏: 它让人以为看过了。
+ */
+const SHOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "outputs",
+  "_verify",
+  "retake-bar.png",
+);
 const PASS = [];
 const FAIL = [];
 const check = (n, c, d = "") => {
@@ -141,7 +161,15 @@ try {
   // ---- 7) 无 JS 错误 ----
   check("无未捕获 JS 异常", errors.length === 0, errors.slice(0, 2).join(" | "));
 } finally {
-  await page.screenshot({ path: "../outputs/_verify/retake-bar.png" }).catch(() => {});
+  // 截图是 teardown 期的诊断产物: 失败要看得见, 但不能让它盖掉
+  // 主体真正的失败原因, 所以只告警不计入 PASS/FAIL。
+  try {
+    mkdirSync(path.dirname(SHOT), { recursive: true });
+    await page.screenshot({ path: SHOT });
+    console.log(`  截图: ${SHOT}`);
+  } catch (e) {
+    console.log(`  [WARN] 截图未生成: ${String(e).split("\n")[0]}`);
+  }
   await browser.close();
 }
 

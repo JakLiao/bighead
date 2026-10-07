@@ -16,14 +16,34 @@
  * 另外两处容易踩空的地方, 都在下面注释里标了。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
+
+/**
+ * 夹具接管断言收集与数据清理。
+ *
+ * 本脚本点两次「生成拼图」, 每次都会经 DecoratePage.doLayout ->
+ * saveCaptures() 建一个 outputs/{job_id}/ 目录, 而 job_id 是后端生成的
+ * 随机 hex。此前台面上没有任何清理, 于是**每跑一次就往 outputs/ 里丢
+ * 两个 job**, 且脚本全绿 —— 泄漏既不会被断言发现, 事后也无法靠目录名
+ * 认出来(前缀扫描对 hex 完全无感)。
+ *
+ * 现在由 h.watchCapturedJobs 在 /api/capture/save 的响应到达时登记,
+ * h.finish() 无条件兜底。判据: 本脚本只做像素级断言(era 有没有烧进
+ * 成片), 不断言 title/tags, 所以可以打 runTag 标记, 清理万一失败也
+ * 还能用 ?q=<runTag> 找回。
+ */
+const h = await createHarness("verify-era-e2e");
+const check = h.check;
+
+/**
+ * 进入前拍快照, 供 finish() 求差集。
+ *
+ * 必须在第一次点「生成拼图」**之前**拍: 否则新 job 进了基线, 差集恒空,
+ * 终检就成了"什么都没查"的空检查 —— 比没有自检更危险。
+ */
+const entrySnapshot = await h.snapshot();
 
 const URL_BASE = process.env.APP_URL || "http://localhost:5173";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n} ${d}`);
-};
 
 // 拼图用 2x2(LayoutStore 默认, 本脚本不改)时后端算出的画布是 1320x1800:
 //   paper_w = 600*2 + 40*3 = 1320, paper_h = 800*2 + 40*3 + 80 = 1800
@@ -59,6 +79,16 @@ const ctx = await browser.newContext({ permissions: ["camera"] });
 const page = await ctx.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
+
+/**
+ * 登记「被测代码自己造的 job」。
+ *
+ * 挂在建 page 之后、任何一次点按钮之前 —— 早于第一次 /api/capture/save
+ * 发生, 才有 interception 的意义; 挂晚了则前几次生成的 job 抓不到。
+ */
+h.watchCapturedJobs(page);
+
+try {
 
 // ---------------------------------------------------------------------------
 // 页面内公用工具
@@ -301,10 +331,22 @@ check(
 
 console.log("\n--- 5. 无运行时错误 ---");
 check("无 pageerror", errors.length === 0, errors.slice(0, 2).join(" | "));
-
-await browser.close();
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) {
-  console.log("失败项: " + FAIL.join(", "));
+} catch (e) {
+  // 断言失败也要算失败, 且不吞异常信息 —— 崩溃若被静默处理, run-all-verify
+  // 会把它显示成 (no summary) 而不是失败(它认退出码)。
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
+} finally {
+  /**
+   * 清理 + 泄漏自检。**必须**在 finally 里。
+   *
+   * 本脚本有 3 处 120s waitForFunction, 超时是最常见的失败模式。清理若写成
+   * 末尾的裸语句, 超时就会直接跳到脚本结束 —— 而此时第 1 次点击造出的
+   * job 已经在 outputs/ 里躺着了。h.finish() 先 drain 在途登记(见
+   * verifyHarness 的 watchCapturedJobs 注释), 再删已登记的, 最后拿退出时的
+   * 快照减去 entrySnapshot 求差集: 任何漏网的新增目录/回收站条目/孤儿键
+   * 都会被抓到, 不论它来自哪条路径。
+   */
+  await h.finish(entrySnapshot);
+  await browser.close();
+  h.report();
 }
-process.exit(FAIL.length ? 1 : 0);

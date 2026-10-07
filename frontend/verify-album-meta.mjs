@@ -12,14 +12,21 @@
  * 注：本脚本自己造数据，自己清理，不依赖其他脚本的残留。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
 const URL = process.env.APP_URL || "http://localhost:5173/gallery";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+
+/**
+ * 夹具接管断言与清理。
+ *
+ * 本脚本两条 job 都由 /api/capture/save 生成, 是后端的随机 hex, 目录名里
+ * 没有可识别前缀 —— 早先"只删自己登记过的 id"这种收尾自检对它们完全无感,
+ * 漏清理从来不会被发现。harness 的快照 diff 看的是"本轮期间 outputs/ 多了
+ * 什么", 与目录名无关。
+ */
+const h = await createHarness("verify-album-meta");
+const check = h.check;
+const entrySnapshot = await h.snapshot();
 
 const browser = await chromium.launch({
   channel: "chrome",
@@ -38,9 +45,24 @@ page.on("pageerror", (e) => console.error("[pageerror]", e));
 
 await page.goto(URL, { waitUntil: "networkidle" });
 
-// 在页面里用 canvas 生成 JPEG（省掉手写 base64 的坑）
+/**
+ * 造一条 job 并登记。
+ *
+ * 这里必须用 `adopt` 而不是 `adoptMarked`: 本脚本有一条断言是
+ * "无元数据条目 title 缺省为空串", 而 adoptMarked 会 PATCH 写入 title=runTag,
+ * 于是纳管动作自己毁掉了被测的前置条件, 断言必然失败。
+ *
+ * 教训值得记下来: **纳管不是隐式无害的**。harness 的登记本身确实只往内存
+ * Set 里加个 id, 但"顺手打个标记"这个便利会把元数据写进 _album.json,
+ * 对任何断言元数据默认值的脚本就是自伤。判断标准很简单 ——
+ * 这个脚本有没有断言 title/tags/note/favorite 的**缺省或初始值**?
+ * 有, 就只能 adopt。
+ *
+ * 登记仍然放在造数函数内部返回, 消除的是"造完 → 断言 → 在 try 里 push"
+ * 这种顺序里天然存在的漏窗口(早先 check() 一抛错, finally 拿到的数组是空的)。
+ */
 async function makeJob(n) {
-  return page.evaluate(async (idx) => {
+  const id = await page.evaluate(async (idx) => {
     const c = document.createElement("canvas");
     c.width = 320;
     c.height = 400;
@@ -57,14 +79,16 @@ async function makeJob(n) {
     if (!r.ok) throw new Error(`capture/save ${r.status}`);
     return (await r.json()).job_id;
   }, n);
+  return h.adopt(id);
 }
 
-const jidA = await makeJob(1);
-const jidB = await makeJob(2);
-check("两条 job 创建成功", !!jidA && !!jidB && jidA !== jidB, `${jidA} / ${jidB}`);
-
-const cleanup = [];
+let jidA;
+let jidB;
 try {
+  jidA = await makeJob(1);
+  jidB = await makeJob(2);
+  check("两条 job 创建成功", !!jidA && !!jidB && jidA !== jidB, `${jidA} / ${jidB}`);
+
   // ---- PATCH 写入 ----
   const r1 = await page.evaluate(async (jid) => {
     const r = await fetch(`/api/gallery/${jid}`, {
@@ -79,7 +103,6 @@ try {
     });
     return { status: r.status, body: await r.json() };
   }, jidA);
-  cleanup.push(jidA, jidB);
   check("PATCH 返回 200", r1.status === 200, `got ${r1.status}`);
   check("PATCH 回显 title", r1.body.title === "毕业季", r1.body.title);
   check("PATCH 回显 note", r1.body.note === "和阿珍在西门", r1.body.note);
@@ -172,16 +195,28 @@ try {
   await page.evaluate(async (jid) => {
     await fetch(`/api/gallery/trash/${jid}/purge`, { method: "POST" }).catch(() => {});
   }, jidA);
+} catch (e) {
+  // 不静默: 异常若被吞掉, run-all-verify 只能看到"少了断言", 定位成本很高。
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
 } finally {
-  // 清理自己造的 B。
-  // 必须带 permanent=true: 删除默认是软删除, 否则 B 会留在回收站里,
-  // 变成下一次运行时列表里的噪声。
-  await page.evaluate(async (jid) => {
-    await fetch(`/api/gallery/${jid}?permanent=true`, { method: "DELETE" }).catch(() => {});
-  }, jidB);
+  /**
+   * 清理 + 泄漏自检。
+   *
+   * 换用 harness 的理由, 每一个都对应旧实现的一个真实缺陷:
+   *
+   * 1. 旧 finally 只 `DELETE ?permanent=true`。jidA 在 try 里被软删除过,
+   *    源目录已搬进 _trash, 而 permanent 对这种 id 走 missing 分支 ——
+   *    清不到回收站里那一份, 于是它在回收站里留到下一次运行。
+   * 2. 旧收尾自检在 `browser.close()` 之后用 `page.evaluate` 探测: 此时
+   *    页面已关, fetch 失败被 catch 吞掉, 两个集合都是 null, `left` 必然
+   *    为空 —— 这条断言**恒真通过**, 看起来在防泄漏, 实际什么都防不了。
+   * 3. 旧自检只比对"自己登记过的 id", 漏登记的那些天然不在比对范围里,
+   *    而它们正是残留的来源。
+   *
+   * harness 的快照 diff 在 node 侧直接读磁盘, 三条路径(job 目录 /
+   * 回收站条目 / _album.json 孤儿键)一次覆盖, 且不受页面状态影响。
+   */
+  await h.finish(entrySnapshot);
   await browser.close();
+  h.report();
 }
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);

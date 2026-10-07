@@ -16,13 +16,30 @@
  */
 import { chromium } from "playwright";
 import { burstTo } from "./maskBurstHelper.mjs";
+import { createHarness } from "./verifyHarness.mjs";
 
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+/**
+ * 夹具接管断言收集与数据清理。
+ *
+ * 此前本脚本的清理写在末尾的裸语句里(不在 finally), 而前半段有 12 个
+ * `page.evaluate` —— 超时是这里最常见的失败, 于是"清理"经常被整个跳过,
+ * 一个真实出片 job 就留在 outputs/ 里。而 job_id 是后端生成的 hex, 事后
+ * 靠目录名认不出来, 收尾自检也扫不到。现在改由 harness 统一兜底。
+ */
+const h = await createHarness("verify-decorate-persist");
+const check = h.check;
+
+/**
+ * 进入前拍快照。
+ *
+ * 必须在任何造数**之前**拍, 否则新 job 会算进基线, diff 永远为空 ——
+ * 那是"自检通过但什么都没查"的典型形态, 比没有自检更危险。
+ *
+ * 刻意不叫 `before`: 脚本中段已有一个 `before` 用来存 /api/gallery 的
+ * 出片前列表(那条断言要对比"本轮新增了几个")。同名会让其中一个静默
+ * 被另一个覆盖, 而两处都在用。
+ */
+const entrySnapshot = await h.snapshot();
 
 const BASE = (process.env.APP_URL || "http://localhost:5173").replace(/\/$/, "");
 
@@ -57,6 +74,23 @@ async function outputsSnapshot() {
   });
 }
 
+/**
+ * 本轮出片的 job_id。
+ *
+ * 提到 try 外面是因为 finally 要用它: 清理必须覆盖"已经出片、但后续断言
+ * 抛了"的时刻, 而那一刻 jobId 已经有值了。
+ */
+let jobId = "";
+
+/**
+ * 主体全部包在 try 里。
+ *
+ * 此前清理是末尾的裸语句, 前面任何一个 `page.evaluate` 抛错(超时的概率
+ * 相当高, 毕竟这里要等 AI 出图) 都会直接跳到脚本结束, 清理不执行 ——
+ * 一个真实 job 留在 outputs/ 里, 而脚本**仍然报 0 失败**。
+ * 这不是"偶尔忘了", 是结构上必然会发生。
+ */
+try {
 await page.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
 
 // ---- 拍 4 张(AI 关闭, 走普通拼图路径)----
@@ -92,7 +126,22 @@ const state = await page.evaluate(() => {
   const s = window.__store.getState();
   return { layoutUrl: s.layoutUrl, shareUrl: s.shareUrl };
 });
-const jobId = state.shareUrl.split("/")[2];
+jobId = state.shareUrl.split("/")[2];
+/**
+ * 立刻登记 + 打上 title 标记。
+ *
+ * 这一段是根治"hex id 泄漏"的关键: job_id 是后端生成的随机 hex, 目录名里
+ * 没有本次运行的任何痕迹, 此前只能靠脚本末尾那行 `permanent=true` 清理。
+ * 一旦中途抛错就没有下一次了。现在登记进 harness, 由 finally 无条件兜底。
+ *
+ * 用 adoptMarked 而不是 adopt: 万一连 harness 的清理也失败了(比如进程被
+ * 强杀), title 里留着的 runTag 就是这条数据归属本脚本的唯一证据,
+ * 下次跑能用 `?q= <runTag>` 搜出来, 不必人工翻 outputs/ 看哪个 hex 是
+ * 测试留下的。`node verify-sweep.mjs --title <runTag>` 同样能定位。
+ * 代价只是一次 PATCH, 且后端 permanent delete 会 album.pop 掉这个键,
+ * 不会在 _album.json 里留下孤儿。
+ */
+await h.adoptMarked(jobId);
 console.log(`  job_id = ${jobId}`);
 check("shareUrl 是服务端路径而非 blob:", !state.shareUrl.startsWith("blob:"));
 check("shareUrl 指向该 job 的 share.jpg", state.shareUrl === `/outputs/${jobId}/share.jpg`, state.shareUrl);
@@ -174,13 +223,22 @@ const cardCount = await page.locator(`[data-job-id="${jobId}"]`).count();
 check("贴纸册里能看到本轮记录", cardCount === 1, `count=${cardCount}`);
 
 check("无未捕获的页面异常", pageErrors.length === 0, pageErrors.join(" | "));
-
-// ---- 清理 ----
-await page.evaluate(async (j) => {
-  await fetch(`/api/gallery/${j}?permanent=true`, { method: "DELETE" }).catch(() => {});
-}, jobId);
-await browser.close();
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);
+} catch (e) {
+  // 断言失败也要算失败, 且不吞异常信息 —— 崩溃若被静默处理,
+  // run-all-verify 会把它显示成 (no summary) 而不是失败(它认退出码)。
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
+} finally {
+  /**
+   * 清理 + 泄漏自检。
+   *
+   * `h.finish()` 做两件事: 走 API 永久删除已登记的 job(源目录若已被搬进
+   * 回收站, 还会逐个 purge), 然后拿退出时的快照减去 entrySnapshot 求差集。
+   *
+   * 后者是新增能力, 也是这个脚本此前最大的缺口: 它的 job_id 是 hex,
+   * 旧的"扫前缀"式收尾自检对它完全无感, 于是漏清理从来不会被发现。
+   * 差集法只看"本次运行期间 outputs/ 多了什么", 与目录名无关。
+   */
+  await h.finish(entrySnapshot);
+  await browser.close();
+  h.report();
+}

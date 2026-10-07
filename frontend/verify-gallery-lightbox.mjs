@@ -19,14 +19,20 @@
  * 本脚本自己造数据、自己清理, 不依赖其它脚本的残留。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
 const URL = process.env.APP_URL || "http://localhost:5173/gallery";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+
+/**
+ * 夹具接管断言与清理。
+ *
+ * 本脚本的 job 由 /api/capture/save 生成, 是后端随机 hex, 目录名里没有
+ * 可识别前缀 —— 早先"逐个比对登记过的 id"的收尾自检对它完全无感, 而
+ * "重新编辑"产生的新 job 更是只能靠 save 的返回值追加。
+ */
+const h = await createHarness("verify-gallery-lightbox");
+const check = h.check;
+const entrySnapshot = await h.snapshot();
 
 const browser = await chromium.launch({
   channel: "chrome",
@@ -49,8 +55,13 @@ await page.goto(URL, { waitUntil: "networkidle" });
 /**
  * 造一个 job: 3 张纯色原图(青/品红/黄) + 拼图 + 分享卡。
  * 纯色底让"贴纸烧进去了"可以用颜色计数判定, 不受压缩噪点干扰。
+ *
+ * 拆成"只 capture/save"与"再补 layout/share"两步, 就是为了让 job_id 在
+ * **第一次落盘之后立刻**回到 Node 侧登记。早先三步都在同一次
+ * page.evaluate 里, 于是 layout/make 抛错时 job_id 还锁在浏览器上下文里,
+ * Node 侧的 createdIds 是空的 —— 目录已经落盘却没人负责删。
  */
-async function makeJobWithLayout(tag) {
+async function makeJobBase(tag) {
   return page.evaluate(async (t) => {
     const cols = ["#00bcd4", "#e91e63", "#ffeb3b"];
     const blobs = [];
@@ -68,38 +79,55 @@ async function makeJobWithLayout(tag) {
     blobs.forEach((b, i) => fd.append("images", b, `photo_${i + 1}.jpg`));
     const jr = await fetch("/api/capture/save", { method: "POST", body: fd });
     if (!jr.ok) throw new Error(`capture/save ${jr.status}`);
-    const { job_id } = await jr.json();
-
-    const fd2 = new FormData();
-    blobs.forEach((b, i) => fd2.append("images", b, `p_${i}.jpg`));
-    fd2.append("layout", "2x2");
-    fd2.append("frame", "none");
-    fd2.append("job_id", job_id);
-    const lr = await fetch("/api/layout/make", { method: "POST", body: fd2 });
-    if (!lr.ok) throw new Error(`layout/make ${lr.status}`);
-    const layoutBlob = await lr.blob();
-    // 分享卡: /api/share/save 收 multipart 的 job_id + layout(拼图字节),
-    // 由前端合成好的卡片字节直接落盘。见 backend/routes/share.py 的说明。
-    const sfd = new FormData();
-    sfd.append("job_id", job_id);
-    sfd.append("layout", layoutBlob, "share.jpg");
-    const sr = await fetch("/api/share/save", { method: "POST", body: sfd });
-    if (!sr.ok) throw new Error(`share/save ${sr.status}`);
-
-    // 给个标题, 便于在列表里定位; 也顺带验证 title 与灯箱标题联动
-    await fetch(`/api/gallery/${job_id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: t }),
-    });
-    return job_id;
+    return (await jr.json()).job_id;
   }, tag);
 }
 
-const jid = await makeJobWithLayout("灯箱测试");
-check("测试 job 创建成功", !!jid, jid);
-/** 本脚本亲手建的 job id。finally 只删这些, 不扫全量。 */
-const createdIds = [jid];
+/**
+ * 在**已存在**的 job 上补拼图与分享卡。
+ *
+ * 单独一步, 因为它失败时 job 已经登记过了 —— 清理不会因为这一步挂掉而漏。
+ */
+async function addLayoutAndShare(jobId, tag) {
+  await page.evaluate(
+    async ([jid, t]) => {
+      const cols = ["#00bcd4", "#e91e63", "#ffeb3b"];
+      const blobs = [];
+      for (let i = 0; i < cols.length; i++) {
+        const c = document.createElement("canvas");
+        c.width = 640;
+        c.height = 480;
+        const g = c.getContext("2d");
+        g.fillStyle = cols[i];
+        g.fillRect(0, 0, c.width, c.height);
+        blobs.push(await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9)));
+      }
+      const fd2 = new FormData();
+      blobs.forEach((b, i) => fd2.append("images", b, `p_${i}.jpg`));
+      fd2.append("layout", "2x2");
+      fd2.append("frame", "none");
+      fd2.append("job_id", jid);
+      const lr = await fetch("/api/layout/make", { method: "POST", body: fd2 });
+      if (!lr.ok) throw new Error(`layout/make ${lr.status}`);
+      const layoutBlob = await lr.blob();
+      // 分享卡: /api/share/save 收 multipart 的 job_id + layout(拼图字节),
+      // 由前端合成好的卡片字节直接落盘。见 backend/routes/share.py 的说明。
+      const sfd = new FormData();
+      sfd.append("job_id", jid);
+      sfd.append("layout", layoutBlob, "share.jpg");
+      const sr = await fetch("/api/share/save", { method: "POST", body: sfd });
+      if (!sr.ok) throw new Error(`share/save ${sr.status}`);
+
+      // 给个标题, 便于在列表里定位; 也顺带验证 title 与灯箱标题联动
+      await fetch(`/api/gallery/${jid}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: t }),
+      });
+    },
+    [jobId, tag],
+  );
+}
 
 /** 找出「本次重新编辑」产生的新 job: 晚于测试起点、且只有 1 张原图。 */
 async function findNewestSingle(startedAt) {
@@ -113,7 +141,13 @@ async function findNewestSingle(startedAt) {
   }, startedAt);
 }
 
+let jid;
 try {
+  jid = await makeJobBase("灯箱测试");
+  check("测试 job 创建成功", !!jid, jid);
+  h.adopt(jid);
+  await addLayoutAndShare(jid, "灯箱测试");
+
   // =========================================================================
   // 1. 后端 media 契约
   // =========================================================================
@@ -326,7 +360,8 @@ try {
   // 新 job: 只有 1 张原图(单张重新编辑的必然结果)
   const newJob = await findNewestSingle(saveStartedAt);
   check("新 job 已创建", !!newJob, newJob?.job_id ?? "none");
-  if (newJob) createdIds.push(newJob.job_id);
+  // 重新编辑产生的新 job 由 save 返回的 id 追加进来, 而不是事后反推。
+  h.adopt(newJob?.job_id);
   check(
     "新 job 只有 1 张产物",
     newJob?.media.length === 1 && newJob.media[0].kind === "photo",
@@ -437,40 +472,26 @@ try {
   });
   check("manifest 失败时代码形状仍能摆上画布", fallbackInk > 500, `ink=${fallbackInk}`);
   await page.unroute("**/stickers/manifest.json");
-} finally {
+
   /*
-    清理**只删本脚本亲手建的 job**。
-    刻意不按"media.length === 1"去扫全量删除: 那是用户的真实数据
-    (单张拍摄是正常使用路径), 批量删会在跑测试时把人家的照片清掉。
-    created 数组是唯一可信的"我造了哪些"记录 —— 重新编辑产生的
-    新 job 由 save 返回的 id 追加进去, 而不是事后反推。
+    未捕获页面错误。
+    排除两类**本脚本自己制造**的错误, 否则断言永远是红的, 久而久之就没人看它了:
+      · manifest 被 route.abort() 拦掉 -> fetch 抛 TypeError: Failed to fetch
+        这是容错用例**故意**制造的输入, 产品正确地降级了(上面已断言)。
+      · favicon / 静态资源 404 —— 与本功能无关。
+    只放宽这两类; 其它任何未捕获错误仍然判失败。
+
+    放在 try 末尾而不是 finally 之后: 放在外面的话, 主体一旦抛错就
+    根本走不到这里, 这条断言会被静默跳过 —— 恰恰是最该报警的时候不报警。
   */
-  const created = [...createdIds];
-  await page.evaluate(
-    async (list) => {
-      for (const id of list) {
-        await fetch(`/api/gallery/${id}?permanent=true`, { method: "DELETE" }).catch(() => {});
-      }
-    },
-    created,
+  const realErrors = pageErrors.filter(
+    (e) => !/favicon|manifest|Failed to load resource|Failed to fetch/i.test(e),
   );
+  check("无未捕获页面错误", realErrors.length === 0, realErrors.slice(0, 3).join(" | "));
+} catch (e) {
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
+} finally {
+  await h.finish(entrySnapshot);
   await browser.close();
+  h.report();
 }
-
-/*
-  未捕获页面错误。
-  排除两类**本脚本自己制造**的错误, 否则断言永远是红的, 久而久之就没人看它了:
-    · manifest 被 route.abort() 拦掉 -> fetch 抛 TypeError: Failed to fetch
-      这是容错用例**故意**制造的输入, 产品正确地降级了(上面已断言)。
-    · favicon / 静态资源 404 —— 与本功能无关。
-  只放宽这两类; 其它任何未捕获错误仍然判失败。
-*/
-const realErrors = pageErrors.filter(
-  (e) =>
-    !/favicon|manifest|Failed to load resource|Failed to fetch/i.test(e),
-);
-check("无未捕获页面错误", realErrors.length === 0, realErrors.slice(0, 3).join(" | "));
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);

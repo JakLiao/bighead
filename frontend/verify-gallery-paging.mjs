@@ -13,6 +13,7 @@
  * 也不会碰用户已有的 job（清理只针对 createdIds）。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
 // 刻意**不叫 URL**: 本文件后面要用 `new URL(...)` 解析请求 url,
 // 而 const URL = "..." 会遮蔽全局 URL 构造器, 表现为
@@ -31,21 +32,26 @@ const PAGE_URL = process.env.APP_URL || "http://localhost:5173/gallery";
  * "路由不存在", 而它是**静默**的(fetch 不抛异常, 只有 r.ok 为 false)。
  */
 const API = "http://127.0.0.1:8077/api";
-const OUT_DIR = "f:/Trae-work/bighead/outputs";
 
 /**
- * 本脚本造过的 job id。**必须声明在 makeJobOnDisk 之前** ——
- * 那函数体里会 created.push(id), 而它定义在下面。const 有 TDZ,
- * 谁把这条声明"顺手挪到脚本中间"就会踩到。
- * 位置放在文件顶部是刻意的: 让依赖方向单向(顶部数据 → 下方逻辑)。
+ * 夹具接管断言、造数登记、清理与泄漏自检。
+ *
+ * 此前本脚本的清理靠 `created` 数组, 而登记发生在**调用方**
+ * (`batchIds.push(await makeJobOnDisk("bt"))` 这种写法), 8 处调用点漏了 6 处,
+ * 清理静默空转 —— 回收站里躺着 3 条 bt* 残留, _album.json 里十几个孤儿键,
+ * 而脚本全程 0 失败。
+ *
+ * 更要命的是收尾自检"逐个比对 created": 漏登记的 id 根本不在比对集合里,
+ * **能发现问题的断法恰好被这个 bug 一起废掉了**。现在改用快照 diff ——
+ * 它看的是"本轮期间 outputs/ 多了什么", 与登记与否无关。
  */
-const created = [];
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+const h = await createHarness("verify-gallery-paging");
+const check = h.check;
+
+/**
+ * 进入前拍快照。必须在任何造数之前, 否则新 job 会算进基线, diff 恒为空。
+ */
+const entrySnapshot = await h.snapshot();
 
 const browser = await chromium.launch({
   channel: "chrome",
@@ -68,80 +74,27 @@ await page.goto(PAGE_URL, { waitUntil: "domcontentloaded" });
  * 造 job。**不依赖 canvas** —— 用 Node 侧直接写文件更简单, 且不占用页面。
  * 但这会绕过 /api/capture/save, 所以只用来测「磁盘上多一个目录时
  * 画廊怎么表现」, 真实拍摄链路由其它脚本覆盖。
+ *
+ * 登记改由 h.makeJobOnDisk 在**函数内部**完成, 调用方拿到的字符串就是 id。
+ *
+ * 此前登记写在函数内(第 105 行), 确实比"调用方 push"好 —— 但它仍是一次
+ * **手工的**登记: 哪天有人把 `created.push(id)` 挪到 writeFile 之后(看起来
+ * 更合理: 造完才算数), 就会退回到"已落盘但没登记"的漏法, 而收尾自检
+ * 因为也只比对 created, 依然全绿。责任收进夹具之后, 调用方根本没有
+ * 登记这个动作可漏。
  */
 async function makeJobOnDisk(tag) {
-  const fs = await import("node:fs/promises");
-  const path = await import("node:path");
-  for (let i = 0; i < 40; i++) {
-    const id = `${tag}${Date.now().toString(36)}${i}`;
-    const full = path.join(OUT_DIR, id);
-    try {
-      await fs.mkdir(full, { recursive: false });
-    } catch {
-      continue;
-    }
-    // 1x1 JPEG。必须是真图: _pick_media 只查文件名不校验内容,
-    // 但前端 <img> 会因解码失败触发 onerror, 让后续断言失真。
-    const jpg = Buffer.from(
-      "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a" +
-        "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
-        "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==",
-      "base64",
-    );
-    await fs.writeFile(path.join(full, "photo_1.jpg"), jpg);
-    /**
-     * 自己登记进 created, 而不是指望调用方记得 push。
-     *
-     * 早先是在调用方 `created.push(id)`, 而 makeJobOnDisk 有 8 处调用点,
-     * 漏了 6 处 —— 于是 cleanupDisk 收到的数组缺了大半, 清理静默空转:
-     * 跑完一轮, 回收站里留下 3 条 bt* 残留, _album.json 里留下十几个
-     * 孤儿键, 而脚本全程 0 失败。**测试数据没清干净, 且没有任何断言会发现**。
-     *
-     * 登记的责任必须落在"造数据的那个函数"里, 因为它是唯一知道
-     * "有个东西需要被清理"的地方。
-     */
-    created.push(id);
-    return id;
-  }
-  throw new Error("makeJobOnDisk 未能创建唯一目录");
+  return h.makeJobOnDisk(tag);
 }
 
 /**
- * 清理本次造的记录。
+ * cleanupDisk 的四步清理逻辑已整体移入 verifyHarness。
  *
- * 四处细节, 少一处就会留下垃圾:
- *
- * 1. 走 **batch-delete API** 而不是 `fs.rm`: 这些 job 被 PATCH 过,
- *    元数据在 outputs/_album.json 里, fs.rm 会留下永久孤儿键。
- * 2. 必须带 `permanent: true`。删除已改成软删除(进回收站), 用默认参数
- *    会把它们留在回收站里 —— 下次跑脚本时列表里就有前一次的残留。
- * 3. 源目录可能已经不在了(被本脚本前面的删除步骤搬进 _trash), 此时
- *    batch-delete 走 missing 分支, **清不到回收站里那一份**, 所以还要
- *    逐个 purge。
- * 4. 少任何一条都会让"清空前回收站恰有 N 条"这类精确计数断言失败,
- *    而且失败原因看起来毫不相关(像是被测功能坏了)。
+ * 那四步(batch-delete permanent -> 逐个 purge -> 后端挂了退回 fs.rm)
+ * 在 6 个脚本里各抄了一份, 而它们是"清理是否干净"的全部要点 ——
+ * 抄错任何一步都只会让磁盘慢慢变脏, 脚本照样 0 失败。
+ * 收进夹具后只有一份实现, 且被 harness-selftest 覆盖。
  */
-async function cleanupDisk(ids) {
-  if (!ids.length) return;
-  try {
-    await fetch(`${API}/gallery/batch-delete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ job_ids: ids, permanent: true }),
-    });
-    for (const id of ids) {
-      // 源目录已不在时返回 404; 还在回收站里才会成功。
-      await fetch(`${API}/gallery/trash/${id}/purge`, { method: "POST" }).catch(() => {});
-    }
-  } catch {
-    // 服务不可用时退回直接删目录: 留孤儿键比留测试目录好, 但两者都不该发生。
-    const fs = await import("node:fs/promises");
-    const path = await import("node:path");
-    for (const id of ids) {
-      await fs.rm(path.join(OUT_DIR, id), { recursive: true, force: true }).catch(() => {});
-    }
-  }
-}
 
 try {
   // ===================== 后端分页契约 =====================
@@ -701,51 +654,23 @@ try {
 } catch (e) {
   check("脚本执行未抛异常", false, String(e && e.message ? e.message : e));
 } finally {
-  await cleanupDisk(created);
-
   /**
-   * 收尾断言: 清理必须真的干净。
+   * 收尾: 清理 + 泄漏自检, 全部交给 harness。
    *
-   * 这一段是被"跑完之后实测发现回收站里躺着 3 条 bt* 残留"逼出来的 ——
-   * cleanupDisk 收到的 created 数组漏登记了 6 处调用点, 于是清理空转,
-   * 而**脚本全程 0 失败**。测试数据没清干净这件事没有任何断言会发现:
-   * 功能断言全绿, 清理是 finally 里的副作用, 没人检查它的结果。
+   * 旧实现在这里扫 `bt|pt|ui` 前缀, 已经是当时能找到的最好办法了 ——
+   * 注释里也写了"逐个比对 created 会漏掉问题本身"。但前缀扫法有两个
+   * 结构性缺陷, 换 harness 才能真正解决:
    *
-   * 断法刻意只按**前缀**扫回收站, 而不是逐个比对 created:
-   * 逐个比对只能证明"我登记过的都清了", 而漏登记的那些 id 根本不在
-   * created 里, 正是残留的来源 —— 那种断法会漏掉问题本身。
+   * 1. **只看前缀**。本脚本中段还会 PATCH 出 `ui` 标签的 job, 而一旦
+   *    将来某个 job 走了 /api/capture/save(hex id), 前缀扫对它完全无感。
+   * 2. **只扫回收站和 _album.json, 不扫 outputs/ 顶层**。目录还在、
+   *    只是没进回收站的情况(比如永久删除失败)就被漏掉了 ——
+   *    而那恰恰是贴纸册里最显眼的垃圾。
    *
-   * 用 node 侧 fetch 而不是 page.evaluate: 下面紧接着就要 close 浏览器,
-   * 页面已经关闭时 evaluate 会抛, 而这是收尾路径, 不该再抛。
+   * 快照 diff 同时看这三处, 且以"进入时没有、退出时有了"为判据,
+   * 与目录叫什么名字无关。
    */
-  const leftoverIds = await fetch(`${API}/gallery/trash`)
-    .then((r) => r.json())
-    .then((t) => t.items.map((x) => x.job_id))
-    .catch(() => []);
-  check(
-    "回收站里没有本脚本前缀(bt/pt/ui)的残留",
-    !leftoverIds.some((id) => /^(bt|pt|ui)[a-z0-9]/.test(id)),
-    `残留: ${leftoverIds.join(",")}`,
-  );
-
-  const albumKeys = await (async () => {
-    try {
-      const fsp = await import("node:fs/promises");
-      return Object.keys(JSON.parse(await fsp.readFile(`${OUT_DIR}/_album.json`, "utf-8")));
-    } catch {
-      // 文件不存在 = 没有孤儿键(后端在 album 为空时会删掉整个文件)
-      return [];
-    }
-  })();
-  check(
-    "_album.json 里没有本脚本前缀的孤儿键",
-    !albumKeys.some((k) => /^(bt|pt|ui)[a-z0-9]/.test(k)),
-    `孤儿键: ${albumKeys.join(",")}`,
-  );
-
+  await h.finish(entrySnapshot);
   await browser.close();
+  h.report();
 }
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);

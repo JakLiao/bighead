@@ -19,17 +19,33 @@
  * 数据安全: 本脚本只点自己造的数据, 删也只有自己造的。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
 // 刻意不叫 URL: 后面要用 new URL(...) 解析请求 url。
 const PAGE_URL = process.env.APP_URL || "http://localhost:5173/gallery";
 const API = process.env.API_URL || "http://127.0.0.1:8077/api";
-const OUT = "f:/Trae-work/bighead/outputs";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+
+/**
+ * 夹具接管断言、造数登记、清理与泄漏自检。
+ *
+ * 本脚本此前已经比多数脚本做得好(makeJob 内部登记 created, 收尾按运行
+ * 短码扫回收站), 所以这里要解决的是它**仍然解决不了**的两点:
+ *
+ * 1. 收尾自检扫的是 `^mq<短码>` 这类**前缀**, 只能覆盖"本脚本按前缀造"的
+ *    那部分。脚本中段若有任何一条路径绕过前缀造数(现在没有, 将来可能有),
+ *    它就成了自检的盲区 —— 与本项目在 share-card/decorate-persist 上踩的
+ *    同一个坑。快照 diff 按"进入时没有、退出时有了"判定, 不看名字。
+ * 2. `created` 是脚本自己维护的集合, 清理和自检都只认它。漏登记的 id
+ *    既不会被清理, 也不会被自检发现 —— **能发现问题的断法被 bug 一起废掉**。
+ *    夹具的补救阶段专门收拾这类漏网。
+ */
+const h = await createHarness("verify-gallery-marquee");
+const check = h.check;
+
+/**
+ * 进入前拍快照。必须在任何造数之前, 否则新 job 会算进基线, diff 恒为空。
+ */
+const entrySnapshot = await h.snapshot();
 
 /**
  * 本次运行的唯一标记。
@@ -39,69 +55,27 @@ const check = (n, c, d = "") => {
  * 手动 Ctrl+C、断言失败后我提前返回), 那些残留就会混进本次搜索结果。
  * 后果是 `waitForFunction(卡片数 === 6)` 等到的是"新 6 + 旧 N"的混合,
  * 于是按 DOM 下标算的期望值全部错位 —— 表现为"区间选随机算错",
- * 而实际被测代码完全正常(同��代码第 1 次跑是 23/0 全绿)。
+ * 而实际被测代码完全正常(同一份代码第 1 次跑是 23/0 全绿)。
  *
  * 唯一标记让"搜到什么"与"历史残留"彻底无关。
- * 长度受ALBUM_MAX_TAG(=16) 限制, 所以用 base36 短码。
+ * 长度受 ALBUM_MAX_TITLE(=64) 约束, 用短 base36 码即可。
  */
-const RUN = `mq${Date.now().toString(36).slice(-9)}`;
-const PREFIX = RUN.slice(0, 3);
-
-const created = new Set();
-const fsp = await import("node:fs/promises");
-const path = await import("node:path");
-
-function jpeg() {
-  return Buffer.from(
-    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a" +
-      "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
-      "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==",
-    "base64",
-  );
-}
+const RUN = h.runTag;
+const PREFIX = RUN.slice(0, 2);
 
 /**
- * 造 job 并**自己登记**进 created。
+ * 造 job: 目录 + 一张真 JPEG + 打上本次运行标记。
  *
- * 登记责任放在这里而不是调用方: verify-gallery-paging.mjs 曾因调用方漏 push
- * 导致清理静默空转, 测试数据留在真实 outputs/ 里而脚本全程 0 失败。
+ * 登记责任全部在 harness 内部(makeJobOnDisk 在 mkdir 成功的第一步就
+ * track), 调用方无从漏 —— 这消除了 verify-gallery-paging 曾踩的
+ * "调用方漏 push, 清理静默空转, 数据留在 outputs/ 而脚本 0 失败"。
  */
-async function makeJob(prefix) {
-  for (let i = 0; i < 40; i++) {
-    // 前缀带本次运行的短码: 万一清理失败, 下次也不会被误当成自己的数据
-    const id = `${prefix}${RUN.slice(2)}${Date.now().toString(36)}${i}`;
-    const full = path.join(OUT, id);
-    try {
-      await fsp.mkdir(full, { recursive: false });
-    } catch {
-      continue;
-    }
-    await fsp.writeFile(path.join(full, "photo_1.jpg"), jpeg());
-    created.add(id);
-    // 打上本次运行的唯一标记: 搜索靠它而不是靠目录名前缀,
-    // 于是历史残留(任何前缀)都不会混进筛选结果。
-    await fetch(`${API}/gallery/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: RUN }),
-    }).catch(() => {});
-    return id;
-  }
-  throw new Error("makeJob 未能创建唯一目录");
-}
-
-async function cleanup() {
-  if (!created.size) return;
-  await fetch(`${API}/gallery/batch-delete`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ job_ids: [...created], permanent: true }),
-  });
-  // permanent 对源目录已不在的 id 返回 missing, 清不到回收站里那一份, 必须逐个 purge。
-  for (const id of created) {
-    await fetch(`${API}/gallery/trash/${id}/purge`, { method: "POST" }).catch(() => {});
-  }
-  created.clear();
+async function makeJob() {
+  const id = await h.makeJobOnDisk(PREFIX);
+  // 打标记: 搜索靠它而不是靠目录名前缀, 于是历史残留(任何前缀)
+  // 都不会混进筛选结果。
+  await h.markJob(id, { title: RUN });
+  return id;
 }
 
 /** 当前选中的 job_id 集合(读 DOM 上的勾选态)。 */
@@ -127,7 +101,7 @@ page.on("pageerror", (e) => console.error("[pageerror]", e));
 try {
   // 造 6 条, 用搜索框过滤到只剩它们, 这样顺序与位置都可控。
   const ids = [];
-  for (let i = 0; i < 6; i++) ids.push(await makeJob(PREFIX));
+  for (let i = 0; i < 6; i++) ids.push(await makeJob());
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded" });
   /**
    * 搜索用**本次运行的唯一标记**(makeJob 已把它写进 title),
@@ -664,43 +638,19 @@ try {
 } catch (e) {
   check("脚本执行未抛异常", false, String(e && e.message ? e.message : e));
 } finally {
-  await cleanup();
+  /*
+    收尾交给 harness: 清理已登记的 -> 中间快照 diff 兜住**未登记**的漏网
+    并强制清掉 -> 终检 diff 断言"磁盘回到进入前状态"。
+
+    早先这里是"按本次运行的短码前缀扫回收站", 看着比逐个比对 created 强,
+    但它有两个盲区:
+      · 它只看回收站, 不看 outputs/ 顶层目录 —— 永久删除失败时目录还在,
+        断言照样通过。
+      · 它只看 _album.json 的孤儿键, 不看目录。
+    三条泄漏路径各断一处, 漏一条就漏一条。快照 diff 是"进入时没有、
+    退出时有了", 与目录名无关, 三条路径一次覆盖, 也不依赖前缀不撞车。
+  */
+  await h.finish(entrySnapshot);
   await browser.close();
-
-  /**
-   * 收尾断言: 清理必须真的干净。
-   *
-   * 扫的是**本次运行的短码**(id 形如 mq<run><time><n>)而不是整个 mq 前缀
-   * —— 后者会把别的脚本/历史轮次的数据算成"我的残留", 在共用环境下
-   * 误报。按前缀扫而不是逐个比对 created 的理由不变: 漏登记的 id 根本
-   * 不在 created 里, 逐个比对恰好会漏掉问题本身(这是 verify-gallery-paging
-   * 实测踩过的坑: 回收站里躺着 3 条残留而脚本 0 失败)。
-   */
-  const mine = new RegExp(`^${PREFIX}${RUN.slice(3)}`);
-  const leftover = await fetch(`${API}/gallery/trash`)
-    .then((r) => r.json())
-    .then((t) => t.items.map((x) => x.job_id))
-    .catch(() => []);
-  check(
-    "回收站里没有本次运行的残留",
-    !leftover.some((id) => mine.test(id)),
-    `残留: ${leftover.join(",")}`,
-  );
-  const albumKeys = await (async () => {
-    try {
-      return Object.keys(JSON.parse(await fsp.readFile(`${OUT}/_album.json`, "utf-8")));
-    } catch {
-      // 文件不存在 = 没有孤儿键
-      return [];
-    }
-  })();
-  check(
-    "_album.json 里没有本次运行的孤儿键",
-    !albumKeys.some((k) => mine.test(k)),
-    `孤儿键: ${albumKeys.join(",")}`,
-  );
+  h.report();
 }
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);

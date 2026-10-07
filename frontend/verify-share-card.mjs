@@ -13,14 +13,23 @@
  * 注：本脚本自己造数据、自己清理，不依赖其他脚本的残留。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
-const URL = process.env.APP_URL || "http://localhost:5173/gallery";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+// 刻意不叫 URL: 下面要用 `new URL(...)` 之类, 且遮蔽全局构造器容易出问题。
+const PAGE_URL = process.env.APP_URL || "http://localhost:5173/gallery";
+
+/**
+ * 夹具接管断言与清理。
+ *
+ * 本脚本的 job 由 /api/capture/save 生成, 是后端的随机 hex —— 目录名里
+ * 没有可识别前缀。此前清理写在 finally 里(这点是对的), 但用的是
+ * `page.evaluate` 发 DELETE: 一旦页面已经崩掉/关闭, evaluate 自己先抛,
+ * 于是清理失败, 而脚本因为已经报完汇总, 看起来是"通过了"。
+ * 改用 node 侧 fetch + harness 登记后, 清理不再依赖页面是否还活着。
+ */
+const h = await createHarness("verify-share-card");
+const check = h.check;
+const entrySnapshot = await h.snapshot();
 
 const browser = await chromium.launch({
   channel: "chrome",
@@ -37,29 +46,45 @@ const ctx = await browser.newContext({
 const page = await ctx.newPage();
 page.on("pageerror", (e) => console.error("[pageerror]", e));
 
-await page.goto(URL, { waitUntil: "domcontentloaded" });
+await page.goto(PAGE_URL, { waitUntil: "domcontentloaded" });
 
-// 造一个 4 张真图的 job（省掉手写 base64 的坑）
-const jobId = await page.evaluate(async () => {
-  const c = document.createElement("canvas");
-  c.width = 320;
-  c.height = 400;
-  const g = c.getContext("2d");
-  g.fillStyle = "#2980b9";
-  g.fillRect(0, 0, c.width, c.height);
-  g.fillStyle = "#fff";
-  g.font = "64px sans-serif";
-  g.fillText("P2", 100, 220);
-  const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
-  const fd = new FormData();
-  for (let i = 0; i < 4; i++) fd.append("images", blob, `p${i}.jpg`);
-  const r = await fetch("/api/capture/save", { method: "POST", body: fd });
-  if (!r.ok) throw new Error(`capture/save ${r.status}`);
-  return (await r.json()).job_id;
-});
-check("job 创建成功", !!jobId, jobId);
+/**
+ * 本脚本亲手造的 job id。**造完立刻登记**, 不等断言通过。
+ *
+ * 登记是负债登记: capture/save 返回 200 的那一刻, 磁盘上已经多了一个目录。
+ * 早先 job 是在 try **之外**造的, 造完到进入 try 之间任何一步抛错
+ * (后端 5xx、页面崩)都会让 finally 根本不执行, job 留在 outputs/ 里。
+ *
+ * 现在登记交给 harness: 它做的多一件事是打上 title 标记, 于是即使清理
+ * 也失败, 下次跑仍能用 `?q=` 把这个 hex job 搜出来删掉, 而不必人工翻目录。
+ */
+async function makeJob() {
+  const id = await page.evaluate(async () => {
+    const c = document.createElement("canvas");
+    c.width = 320;
+    c.height = 400;
+    const g = c.getContext("2d");
+    g.fillStyle = "#2980b9";
+    g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = "#fff";
+    g.font = "64px sans-serif";
+    g.fillText("P2", 100, 220);
+    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.9));
+    const fd = new FormData();
+    for (let i = 0; i < 4; i++) fd.append("images", blob, `p${i}.jpg`);
+    const r = await fetch("/api/capture/save", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(`capture/save ${r.status}`);
+    return (await r.json()).job_id;
+  });
+  // adoptMarked = 打标记 + 登记。两者都在造数点内部完成, 调用方无从漏。
+  return h.adoptMarked(id);
+}
 
+let jobId;
 try {
+  jobId = await makeJob();
+  check("job 创建成功", !!jobId, jobId);
+
   // ---- layout/make 带 job_id -> 落盘 ----
   const lay = await page.evaluate(async (jid) => {
     const c = document.createElement("canvas");
@@ -204,13 +229,30 @@ try {
   );
   check("刷新页面后 share.jpg 依然可访问（不是 blob: URL）",
     before === 200 && after === 200, `before=${before} after=${after}`);
+} catch (e) {
+  // 不静默: 异常若被吞掉, run-all-verify 只能看到"少了断言", 定位成本很高。
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
 } finally {
-  await page.evaluate(async (jid) => {
-    await fetch(`/api/gallery/${jid}?permanent=true`, { method: "DELETE" }).catch(() => {});
-  }, jobId);
+  /**
+   * 清理 + 泄漏自检。
+   *
+   * 换用 harness 的三个理由, 每一个都对应旧实现的一个真实缺陷:
+   *
+   * 1. 旧清理走 `page.evaluate` 发 DELETE。页面若已崩/已关, evaluate 自己
+   *    先抛, 整段被 `.catch(() => {})` 吞掉 —— 清理静默失败, 而汇总早已
+   *    打印完毕, 看起来是"通过了"。harness 走 node 侧 fetch, 不依赖页面。
+   *
+   * 2. 旧的收尾自检在 `browser.close()` **之后**用 `page.evaluate` 探测。
+   *    此时页面已关, fetch 失败被 `.catch(() => null)` 吞掉, inGallery 与
+   *    inTrash 都是 null, 于是 `left` 必然为空数组, **这条断言恒真通过** ——
+   *    它看起来在防泄漏, 实际上什么都防不了。harness 的快照 diff 在
+   *    node 侧直接读磁盘, 不受页面状态影响。
+   *
+   * 3. 旧的比对范围只有"自己登记过的 id"。漏登记的那些天然不在比对集合里,
+   *    而它们正是残留的来源。diff 法看的是"本轮期间 outputs/ 多了什么",
+   *    登记与否都逃不掉。
+   */
+  await h.finish(entrySnapshot);
   await browser.close();
+  h.report();
 }
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);

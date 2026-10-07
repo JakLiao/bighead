@@ -23,14 +23,31 @@
  * "贴纸可以贴到任何地方"。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
+
+/**
+ * 夹具接管断言收集与数据清理。
+ *
+ * 本脚本点三次「生成拼图」(§2/§5/§8), 每次都经 DecoratePage.doLayout ->
+ * saveCaptures() 建一个 outputs/{job_id}/ 目录, job_id 是后端生成的随机
+ * hex。原先**没有任何清理**, 于是每跑一次就往 outputs/ 里丢 3 个 job,
+ * 而脚本全绿: 泄漏不会被断言发现, 也无法靠目录名认领(前缀扫描对 hex
+ * 无感), 只能人工翻 outputs/。
+ *
+ * 现在由 h.watchCapturedJobs 在 /api/capture/save 响应到达时登记,
+ * h.finish() 无条件兜底。可以开 mark(打 runTag 标记)是因为本脚本只做
+ * 像素级断言, 不断言 title/tags 的值或数量。
+ */
+const h = await createHarness("verify-sticker-edit");
+const check = h.check;
+
+/**
+ * 进入前拍快照, 供 finish() 求差集。必须在第一次点「生成拼图」之前 ——
+ * 否则新 job 进了基线, 差集恒空, 终检就是"什么都没查"的空检查。
+ */
+const entrySnapshot = await h.snapshot();
 
 const URL_BASE = process.env.APP_URL || "http://localhost:5173";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n} ${d}`);
-};
 
 /** 红/黄/蓝 三种纯色签名(对应 STICKER_COLORS 头三色)。 */
 const RED = "#ff3b30"; // rgb(255,59,48)
@@ -60,6 +77,14 @@ const ctx = await browser.newContext({
 const page = await ctx.newPage();
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
+
+/**
+ * 登记「被测代码自己造的 job」。必须早于 §2 的第一次点击, 否则第一个 job
+ * 抓不到 —— 而它恰好是最容易在超时里丢掉的(那一节要等 120s)。
+ */
+h.watchCapturedJobs(page);
+
+try {
 
 // ---------------------------------------------------------------------------
 // 页面内公用工具
@@ -882,10 +907,21 @@ check("reset 后 frames 被清空", afterReset.frames === 0, `${afterReset.frame
 // ---------------------------------------------------------------------------
 console.log("\n--- 10. 无运行时错误 ---");
 check("无 pageerror", errors.length === 0, errors.slice(0, 2).join(" | "));
-
-await browser.close();
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) {
-  console.log("失败项: " + FAIL.join(", "));
+} catch (e) {
+  // 断言失败也要算失败, 且不吞异常信息 —— 崩溃若被静默处理, run-all-verify
+  // 会把它显示成 (no summary) 而不是失败(它认退出码)。
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
+} finally {
+  /**
+   * 清理 + 泄漏自检。**必须**在 finally 里。
+   *
+   * 本脚本有 3 处 120s waitForFunction, 超时是常态而非例外。清理若写成
+   * 末尾的裸语句, 超时就会直接跳到脚本结束 —— 那时 §2/§5/§8 三次点击
+   * 造出的 job 已经在 outputs/ 里了, 且一次都不会被删。h.finish() 先
+   * drain 在途登记, 再删已登记的, 最后拿退出快照减 entrySnapshot 求差集:
+   * 任何漏网的新增目录/回收站条目/孤儿键都会被抓到, 与目录名无关。
+   */
+  await h.finish(entrySnapshot);
+  await browser.close();
+  h.report();
 }
-process.exit(FAIL.length ? 1 : 0);

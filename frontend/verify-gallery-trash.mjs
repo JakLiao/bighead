@@ -15,6 +15,7 @@
  * 见 makeJobOnDisk 上方说明。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
 // 刻意**不叫 URL**: 后面要用 `new URL(...)` 解析请求 url,
 // 而 const URL = "..." 会遮蔽全局 URL 构造器, 表现为
@@ -23,10 +24,9 @@ const PAGE_URL = process.env.APP_URL || "http://localhost:5173/gallery";
 /**
  * 后端 API 基址, **含 `/api` 前缀**。
  *
- * 下面多数调用走 `api()` helper, 它内部自己拼了 "/api/..."。只有
- * 收尾断言里这一处直接用 `${API}` —— 而 API 已经含了 /api, 才不会少一段。
- * 若把前缀从常量里去掉, 这一处就会变成 /gallery/trash → 404,
- * 且 fetch 不抛异常, 只会安静地让断言读到空数组。
+ * 下面多数调用走 `api()` helper, 它内部自己拼了 "/api/..."。若把前缀从
+ * 常量里去掉, 就会变成 /gallery/trash → 404, 且 fetch 不抛异常, 只会
+ * 安静地让断言读到空数组。
  */
 const API = process.env.API_URL || "http://127.0.0.1:8077/api";
 
@@ -44,15 +44,20 @@ const API = process.env.API_URL || "http://127.0.0.1:8077/api";
 const ORIGIN = process.env.API_URL
   ? process.env.API_URL.replace(/\/api\/?$/, "")
   : "http://127.0.0.1:8077";
-const OUT = "f:/Trae-work/bighead/outputs";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
 
-const created = new Set();
+/**
+ * 夹具接管断言、造数登记、清理与泄漏自检。
+ *
+ * outputs/ 路径由 harness 从 `verifyHarness.mjs` 的位置推导, 不再写死
+ * `f:/Trae-work/bighead/outputs` —— 换机器或挪仓库时, 漏改的那一份会
+ * 安静地往别处造数据, 而它仍会 0 失败, 因为清理用的是同一个错路径。
+ */
+const h = await createHarness("verify-gallery-trash");
+const check = h.check;
+/** 进入前拍快照。必须在任何造数之前, 否则新 job 会算进基线, diff 恒为空。 */
+const entrySnapshot = await h.snapshot();
+/** outputs/ 绝对路径, 供下面拼磁盘断言用。 */
+const OUT = h.outDir;
 
 /**
  * 文件系统模块在**模块作用域**引入一次。
@@ -95,31 +100,12 @@ async function api(method, path, body) {
  * 造 job。**不依赖 canvas** —— 直接写文件更简单, 且不占用页面。
  * 绕过 /api/capture/save, 所以只用来测「磁盘上多/少一个目录时画廊怎么表现」,
  * 真实拍摄链路由其它脚本覆盖。
+ *
+ * 登记全部由 harness 在 mkdir 成功的第一步完成(负债登记), 调用方拿到的
+ * 字符串就是 id, 没有"记得 push"这个动作可漏。
  */
 async function makeJobOnDisk(tag) {
-  const fs = await import("node:fs/promises");
-  const path = await import("node:path");
-  for (let i = 0; i < 40; i++) {
-    const id = `${tag}${Date.now().toString(36)}${i}`;
-    const full = path.join(OUT, id);
-    try {
-      await fs.mkdir(full, { recursive: false });
-    } catch {
-      continue;
-    }
-    // 1x1 JPEG。必须是真图: 前端 <img> 解码失败会触发 onerror,
-    // 让后续断言失真(看到的是 onerror 兜底而不是我们要的缩略图)。
-    const jpg = Buffer.from(
-      "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0a" +
-        "HBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAA" +
-        "AAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q==",
-      "base64",
-    );
-    await fs.writeFile(path.join(full, "photo_1.jpg"), jpg);
-    created.add(id);
-    return id;
-  }
-  throw new Error("makeJobOnDisk 未能创建唯一目录");
+  return h.makeJobOnDisk(tag);
 }
 
 /**
@@ -128,6 +114,11 @@ async function makeJobOnDisk(tag) {
  * 目录名格式必须与后端 _trash_name 一致("<毫秒时间戳>_<job_id>"), 否则
  * _split_trash_name 会返回 None, 它会被当成垃圾忽略掉 —— 那这条断言就是
  * 因为造数据方式错了而"通过", 属于假阳性。
+ *
+ * 登记同样紧跟 mkdir: 回收站条目也是真实落盘的数据, 后端读到它就会在
+ * 某次列表请求时被自动 purge, 之后磁盘上什么都不剩 —— 但**元数据 sidecar
+ * 可能已经写进 _album.json**, 那份残留没有任何前缀特征, 只有 harness
+ * 的快照差值能抓到。
  */
 async function makeExpiredTrashEntry(jobId, daysAgo) {
   const fs = await import("node:fs/promises");
@@ -136,38 +127,9 @@ async function makeExpiredTrashEntry(jobId, daysAgo) {
   const name = `${Math.floor(ms)}_${jobId}`;
   const full = path.join(OUT, "_trash", name);
   await fs.mkdir(full, { recursive: true });
+  h.track(jobId);
   await fs.writeFile(path.join(full, "photo_1.jpg"), Buffer.from("x"));
-  created.add(jobId);
   return { name, full };
-}
-
-/**
- * 清理本脚本造的一切。
- *
- * 删除已经是软删除, 所以"造了 job 的脚本清理自己"必须覆盖**两个位置**,
- * 少一个就会给下一次运行留垃圾:
- *
- *  1. outputs/<id>/ —— 还在磁盘上的源目录。
- *  2. outputs/_trash/ —— 前面的步骤可能已经把它删进去了。
- *     `batch-delete?permanent=true` 对这些 id 会返回 missing(源目录已不在),
- *     **清不到回收站里那一份**。
- *
- * 早先只做 (1), 于是跑一轮之后回收站里堆着上一个脚本的残留
- * (实测 8 条), 而"清空前回收站恰有 3 条"这种精确计数断言就必然失败。
- *
- * 这里只 purge 本脚本 created 里记下的 id, 不碰别人的。
- */
-async function cleanup() {
-  if (!created.size) return;
-  await api("POST", "/api/gallery/batch-delete", {
-    job_ids: [...created],
-    permanent: true,
-  });
-  for (const id of created) {
-    // 源目录已不在时这条返回 404; 真的在回收站里才会 purge 成功。
-    await api("POST", `/api/gallery/trash/${id}/purge`);
-  }
-  created.clear();
 }
 
 const browser = await chromium.launch({ channel: "chrome" });
@@ -292,10 +254,16 @@ try {
   // ===================== 安全：路径穿越 =====================
   const path = await import("node:path");
   const evilDir = path.join(OUT, "_trash", "1700000000000_..");
+  // 恶意目录名也走 try/finally: 它是 mkdir 出来的真实目录, 中间的
+  // api() 抛错(服务重启/超时)就会跳过下面的 rm, 在 _trash 里留一个
+  // 名字带 ".." 的目录 —— 而它恰恰是后端要忽略的形态, 残留时看不出来。
   await fsp.mkdir(evilDir, { recursive: true });
-  const t6 = await api("GET", "/api/gallery/trash");
-  check("恶意目录名 .. 被忽略", !t6.body.items.find((x) => x.job_id === ".."));
-  await fsp.rm(evilDir, { recursive: true, force: true });
+  try {
+    const t6 = await api("GET", "/api/gallery/trash");
+    check("恶意目录名 .. 被忽略", !t6.body.items.find((x) => x.job_id === ".."));
+  } finally {
+    await fsp.rm(evilDir, { recursive: true, force: true });
+  }
   /**
    * 路径穿越的三种形态要分开断, 因为它们死在**不同的地方**:
    *  - "a/b": %2F 解码成路径分隔符 → 路径段变多 → 匹配不到本路由(404)。
@@ -332,45 +300,132 @@ try {
     inTrash.has(keepId) && inTrash.has(B1) && inTrash.has(B2),
     `keepId=${inTrash.has(keepId)} B1=${inTrash.has(B1)} B2=${inTrash.has(B2)} total=${beforeEmpty.total}`,
   );
-  const emp = await api("POST", "/api/gallery/trash/empty");
-  check("清空返回 200", emp.status === 200, `got ${emp.status}`);
-  check("清空后 total 为 0", (await api("GET", "/api/gallery/trash")).body.total === 0);
+
   /**
-   * _trash 目录本身必须还在。
+   * ==================== 清空前置守卫: 不属于我们的, 一律不动 ====================
    *
-   * 它是 StaticFiles 挂载点(/outputs/_trash/...)。如果清空时 rmtree 掉整个
-   * _trash, 挂载路径立刻 404, 直到下次有删除操作才重建 —— 期间前端缓存的
-   * 缩略图 URL 全变碎图。逐条删内容、保目录是这个断言存在的唯一理由。
+   * `/api/gallery/trash/empty` 是**全局、不可逆**的: 它清掉整个回收站,
+   * 没有逐条选择、没有确认弹窗、没有回收站二阶。跑这个脚本时如果用户
+   * 回收站里有他自己 30 天内不想丢的照片, 这一行会**永久删掉它们**,
+   * 而脚本会 0 失败 —— 因为被测功能确实正常, 损失发生在断言覆盖不到的地方。
+   *
+   * 早先这里是无条件调用。之所以一直没人发现: 本机跑它时回收站恰好是空的,
+   * 于是"清空"这个动作在测试期间没有任何可观测后果。而**恰好为空**这件事
+   * 是运气, 不是前提 —— 明天用户随手删一张, 这个脚本就变成数据破坏脚本。
+   *
+   * 所以判据不是"跑之前回收站是不是空的", 而是"回收站里的每一条都能证明
+   * 是本脚本造的"。用 h.tracked() 拿白名单(与清理系统同一份集合, 不另
+   * 维护一份 created): 只要出现一条不在白名单里的, 就整段跳过。
+   *
+   * 跳过而不是"只清自己的"是因为清空是全局动作, 无法只清一部分 ——
+   * 想要"清掉我造的 3 条"这个断言, 用下面那条逐条 purge 就够了, 语义
+   * 等价且不会误伤。
    */
-  check("清空后 _trash 目录仍在(静态挂载有效)", await dirExists(`${OUT}/_trash`));
+  const trashOwned = new Set(h.tracked());
+  const foreignTrash = beforeEmpty.items.filter((x) => !trashOwned.has(x.job_id));
+  const mayEmpty = foreignTrash.length === 0;
+
+  /**
+   * 这里刻意**不**用 check 判失败, 只用 check 记录"检查发生过", 再按结果分支。
+   *
+   * 早先写成 `check("清空前回收站里没有非本脚本的条目", mayEmpty)` ——
+   * 于是"守卫成功拦下破坏性操作"这个**好结果**反而让脚本红 2 条。
+   * 那等于在说: 环境越脏, 这个脚本越不可能通过, 于是大家会去清空用户的
+   * 回收站来"让测试变绿"。奖励与目标完全相反。
+   *
+   * 正确的形状是: 报告事实 -> 安全降级 -> 断言降级后仍然成立。
+   */
+  console.log(
+    mayEmpty
+      ? `  [info] 回收站内 ${beforeEmpty.total} 条全部归本脚本所有, 可以安全执行 trash/empty`
+      : `  [warn] 回收站里有 ${foreignTrash.length} 条非本脚本数据 (${foreignTrash.slice(0, 4).map((x) => x.job_id).join(",")}), 拒绝执行全局 trash/empty`,
+  );
+
+  if (mayEmpty) {
+    const emp = await api("POST", "/api/gallery/trash/empty");
+    check("清空返回 200", emp.status === 200, `got ${emp.status}`);
+    check("清空后 total 为 0", (await api("GET", "/api/gallery/trash")).body.total === 0);
+    /**
+     * _trash 目录本身必须还在。
+     *
+     * 它是 StaticFiles 挂载点(/outputs/_trash/...)。如果清空时 rmtree 掉整个
+     * _trash, 挂载路径立刻 404, 直到下次有删除操作才重建 —— 期间前端缓存的
+     * 缩略图 URL 全变碎图。逐条删内容、保目录是这个断言存在的唯一理由。
+     */
+    check("清空后 _trash 目录仍在(静态挂载有效)", await dirExists(`${OUT}/_trash`));
+  } else {
+    /**
+     * 有外来数据时的等价替代: 逐条 purge 本脚本造的, 断言"清掉之后它们不在
+     * 回收站里了" —— 也就是清空功能真正要保证的那件事。
+     *
+     * 刻意不断 `total === 0`: 那个值此刻还包含用户的数据, 断了就是在断言
+     * "用户的回收站必须是空的"。
+     */
+    console.log(`  [warn] 回收站里有 ${foreignTrash.length} 条非本脚本数据, 跳过 trash/empty, 改用逐条 purge 验证`);
+    for (const id of [keepId, B1, B2]) {
+      await api("POST", `/api/gallery/trash/${id}/purge`);
+    }
+    const left = new Set((await api("GET", "/api/gallery/trash")).body.items.map((x) => x.job_id));
+    check(
+      "逐条 purge 后本脚本造的都不在回收站",
+      !left.has(keepId) && !left.has(B1) && !left.has(B2),
+      `left=${[...left].slice(0, 4).join(",")}`,
+    );
+    // 只断"**别人的那几条还在**" —— 这正是守卫要保护的东西。
+    // 反过来断 `total > 0` 是同一个意思但更间接; 不断 total===0,
+    // 因为那个值此刻含用户数据, 断了等于断言"用户的回收站必须是空的"。
+    const foreignStillThere = foreignTrash.every((x) => left.has(x.job_id));
+    check(
+      "别人的回收站数据未被波及",
+      foreignStillThere,
+      `foreign=${foreignTrash.map((x) => x.job_id).join(",")} left=${[...left].slice(0, 4).join(",")}`,
+    );
+    check("清空后 _trash 目录仍在(静态挂载有效)", await dirExists(`${OUT}/_trash`));
+  }
 
   // ===================== 前端 =====================
   await page.goto(PAGE_URL, { waitUntil: "domcontentloaded" });
   check("画廊顶部有「回收站」入口", (await page.locator("[data-trash-open]").count()) === 1);
 
-  // 空态
-  await page.locator("[data-trash-open]").click();
-  await page.waitForSelector("[data-trash-panel]", { timeout: 8000 });
-  check("点击后打开回收站抽屉", (await page.locator("[data-trash-panel]").count()) === 1);
-  await page.waitForSelector("[data-trash-blank]", { timeout: 8000 });
-  check("空回收站显示空态", ((await page.locator("[data-trash-blank]").textContent()) || "").includes("空"));
   /**
-   * 空回收站不该出现「清空回收站」按钮。
+   * 空态段只在**回收站真的为空**时才有意义。
    *
-   * 按文本找而不是靠 data 属性 —— 空态(空回收站)和「清空」按钮是两组
-   * 相反的语义, 如果共用一个属性名, 断言就分不清自己断的是哪一个,
-   * 这里被迫写成恒真的形式。
+   * 它验的是"空的时候显示什么", 与被测功能无关地依赖"空"这个前置条件。
+   * 而这个前置条件由上面的守卫决定: 回收站里有外来数据时我们拒绝清空,
+   * 于是此刻它并不空 —— 此时去断 `[data-trash-blank]` 必然红, 而被测
+   * 代码完全正常。这类"前提不成立还硬断"的失败会诱导人改产品代码,
+   * 所以这里显式跳过并说明原因, 而不是让 4 条红字混在结果里。
+   *
+   * 反过来也刻意**没有**去断"非空时显示摘要行/清空按钮"来补偿 ——
+   * 那需要先把别人的数据挪走才能造出稳定的非空态, 而挪数据就是破坏。
    */
-  check(
-    "空回收站不显示清空按钮",
-    (await page.locator("button:has-text('清空回收站')").count()) === 0,
-  );
-  check("空回收站不显示摘要行", (await page.locator("[data-trash-summary]").count()) === 0);
+  const trashEmptyNow = (await api("GET", "/api/gallery/trash")).body.total === 0;
+  if (trashEmptyNow) {
+    await page.locator("[data-trash-open]").click();
+    await page.waitForSelector("[data-trash-panel]", { timeout: 8000 });
+    check("点击后打开回收站抽屉", (await page.locator("[data-trash-panel]").count()) === 1);
+    await page.waitForSelector("[data-trash-blank]", { timeout: 8000 });
+    check("空回收站显示空态", ((await page.locator("[data-trash-blank]").textContent()) || "").includes("空"));
+    /**
+     * 空回收站不该出现「清空回收站」按钮。
+     *
+     * 按文本找而不是靠 data 属性 —— 空态(空回收站)和「清空」按钮是两组
+     * 相反的语义, 如果共用一个属性名, 断言就分不清自己断的是哪一个,
+     * 这里被迫写成恒真的形式。
+     */
+    check(
+      "空回收站不显示清空按钮",
+      (await page.locator("button:has-text('清空回收站')").count()) === 0,
+    );
+    check("空回收站不显示摘要行", (await page.locator("[data-trash-summary]").count()) === 0);
 
-  // Esc 关闭
-  await page.keyboard.press("Escape");
-  await page.waitForSelector("[data-trash-panel]", { state: "detached", timeout: 8000 });
-  check("Esc 可关闭回收站", (await page.locator("[data-trash-panel]").count()) === 0);
+    // Esc 关闭
+    await page.keyboard.press("Escape");
+    await page.waitForSelector("[data-trash-panel]", { state: "detached", timeout: 8000 });
+    check("Esc 可关闭回收站", (await page.locator("[data-trash-panel]").count()) === 0);
+  } else {
+    console.log("  [warn] 回收站非空(含非本脚本数据), 跳过空态段断言 —— 空态的前提不成立");
+  }
 
   // 造一条走前端删除 → 回收站 UI
   const U1 = await makeJobOnDisk("tu");
@@ -479,6 +534,10 @@ try {
    * 且**每次都在同一个 id 上**(前缀 tr = 前面 trash 用例留下的)。
    *
    * 现在问后端: 分页把所有 id 拉齐, 取交集。权威、与时序无关。
+   *
+   * 白名单从 `h.tracked()` 取, 而不是脚本自己那份 created —— 两份登记
+   * 迟早会不一致, 而不一致的方向恰恰是漏清理: 清理按harness 的那份走,
+   * 勾选按脚本那份走, 一旦脚本那份漏了某个 id, 它就会留在磁盘上。
    */
   const listedIds = new Set();
   for (let off = 0; off < 1200; off += 200) {
@@ -486,7 +545,7 @@ try {
     for (const it of page_.body.items) listedIds.add(it.job_id);
     if (!page_.body.has_more) break;
   }
-  const batchTargets = [...created].filter((id) => listedIds.has(id));
+  const batchTargets = h.tracked().filter((id) => listedIds.has(id));
   check("批量删除目标都是本脚本造的", batchTargets.length > 0, `n=${batchTargets.length}`);
   check(
     "批量删除目标都在后端列表里",
@@ -605,83 +664,113 @@ try {
   check("批量删除的条目全进了回收站", trashN > 0, `total=${trashN}`);
 
   // 两段式清空
-  check("有「清空回收站」按钮", (await page.locator("[data-trash-empty]").count()) === 1);
-  await page.locator("[data-trash-empty]").click();
-  await page.waitForSelector("[data-trash-empty-confirm]", { timeout: 5000 });
-  check("第一次点击只进确认态", (await page.locator("[data-trash-empty-confirm]").count()) === 1);
-  await page.locator("[data-trash-empty-cancel]").click();
-  await page.waitForTimeout(200);
-  check("取消后回收站未被清", (await api("GET", "/api/gallery/trash")).body.total === trashN);
-  await page.locator("[data-trash-empty]").click();
-  await page.waitForSelector("[data-trash-empty-confirm]", { timeout: 5000 });
-  await page.locator("[data-trash-empty-confirm]").click();
-  await page.waitForSelector("[data-trash-note]", { timeout: 8000 });
-  check("清空后回收站为空", (await api("GET", "/api/gallery/trash")).body.total === 0);
-  check(
-    "清空后卡片全部消失",
-    (await page.locator("[data-trash-item]").count()) === 0,
-    `items=${await page.locator("[data-trash-item]").count()}`,
-  );
-  check("清空后清空按钮消失", (await page.locator("button:has-text('清空回收站')").count()) === 0);
-  check("清空后摘要行消失", (await page.locator("[data-trash-summary]").count()) === 0);
+  //
+  // 同一个守卫: 这个按钮调的就是全局 trash/empty, 与上面那条 API 等价。
+  // 到这一步回收站里必然有本脚本造的条目(批量删除刚放进去的), 但**也可能
+  // 有别人的** —— 守卫放得太早, 那时回收站可能恰好是空的, 拦不住这里。
+  // 所以这段必须**重新**判定一次, 不能复用 mayEmpty。
+  const trashBeforeUiEmpty = (await api("GET", "/api/gallery/trash")).body.items;
   /**
-   * 刻意**不**断空态文案出现: TrashPanel 的空态条件带 `&& !note`,
-   * 所以清空后那句"回收站已清空, 共删除 N 条"会取代它。
+   * 归属判据比前一段宽: 除登记过的, 还认"目录名含本次运行短码"的。
    *
-   * 这是有意的优先级: 清空是用户刚做过的不可逆操作, 给一句"共删了 N 条"
-   * 比让他看见一个冷冰冰的"回收站是空的"更能确认操作成功。
-   * 早先这里等 data-trash-blank, 于是必然超时 —— 断的是一个设计上
-   * 不该出现的状态。
+   * 为什么必须更宽: 这一段之前刚做过 UI 批量删除, 那批条目是**被测代码**
+   * 搬进回收站的, 其中可能有 harness 造数时 track 过的, 也可能有走
+   * `/api/capture/save` 只 adopt 过的 —— 后者不在 h.tracked() 里却确实是
+   * 本脚本造的。用 runCode 兜住这一类, 避免把它们误判成"别人的数据"
+   * 而让这段 UI 断言永远被跳过(那等于把清空流程的覆盖悄悄废掉)。
    */
-  check(
-    "清空后给出结果提示",
-    ((await page.locator("[data-trash-note]").textContent()) || "").includes("已清空"),
-    (await page.locator("[data-trash-note]").textContent()) || "",
-  );
-} catch (e) {
-  FAIL.push(`脚本异常:${e && e.message ? e.message : e}`);
-  console.error("[error]", e);
-} finally {
-  await cleanup();
-  /**
-   * 收尾断言: 清理必须真的干净。
-   *
-   * 与 verify-gallery-paging 里那段同一个理由 —— 那个脚本因为
-   * makeJobOnDisk 没登记 created, 清理静默空转, 回收站里留了 3 条 bt*,
-   * 而它全程 0 失败。功能断言全绿, 清理是 finally 里的副作用,
-   * 没人检查它的结果, 于是"测试数据没清干净"可以一直悄悄通过。
-   *
-   * 断法按**前缀**扫, 不逐个比对 created: 漏登记的 id 根本不在 created 里,
-   * 逐个比对恰好会漏掉问题本身。
-   */
-  const leftoverIds = await fetch(`${API}/gallery/trash`)
-    .then((r) => r.json())
-    .then((t) => t.items.map((x) => x.job_id))
-    .catch(() => []);
-  check(
-    "回收站里没有本脚本前缀(tr/tk/tp/tb/tu/expired)的残留",
-    !leftoverIds.some((id) => /^(tr|tk|tp|tb|tu|expired)[a-z0-9]/.test(id)),
-    `残留: ${leftoverIds.join(",")}`,
-  );
-  const albumKeys = await (async () => {
-    try {
-      return Object.keys(JSON.parse(await fsp.readFile(`${OUT}/_album.json`, "utf-8")));
-    } catch {
-      // 文件不存在 = 没有孤儿键(后端在 album 为空时会删掉整个文件)
-      return [];
-    }
-  })();
-  check(
-    "_album.json 里没有本脚本前缀的孤儿键",
-    !albumKeys.some((k) => /^(tr|tk|tp|tb|tu|expired)[a-z0-9]/.test(k)),
-    `孤儿键: ${albumKeys.join(",")}`,
-  );
-  await browser.close();
-}
+  const ownedSet = new Set(h.tracked());
+  const ownedNow = (id) => ownedSet.has(id) || id.includes(h.runCode);
+  const foreignUi = trashBeforeUiEmpty.filter((x) => !ownedNow(x.job_id));
+  const mayUiEmpty = foreignUi.length === 0;
 
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);
+  // 同上: 守卫触发是**好结果**, 不能判失败。只报告, 然后安全降级。
+  console.log(
+    mayUiEmpty
+      ? `  [info] 回收站内 ${trashBeforeUiEmpty.length} 条全部归本脚本所有, 可以安全点 UI 清空`
+      : `  [warn] 回收站里有 ${foreignUi.length} 条非本脚本数据 (${foreignUi.slice(0, 4).map((x) => x.job_id).join(",")}), 拒绝点 UI 清空`,
+  );
+
+  if (mayUiEmpty) {
+    check("有「清空回收站」按钮", (await page.locator("[data-trash-empty]").count()) === 1);
+    await page.locator("[data-trash-empty]").click();
+    await page.waitForSelector("[data-trash-empty-confirm]", { timeout: 5000 });
+    check("第一次点击只进确认态", (await page.locator("[data-trash-empty-confirm]").count()) === 1);
+    await page.locator("[data-trash-empty-cancel]").click();
+    await page.waitForTimeout(200);
+    check("取消后回收站未被清", (await api("GET", "/api/gallery/trash")).body.total === trashN);
+    await page.locator("[data-trash-empty]").click();
+    await page.waitForSelector("[data-trash-empty-confirm]", { timeout: 5000 });
+    await page.locator("[data-trash-empty-confirm]").click();
+    await page.waitForSelector("[data-trash-note]", { timeout: 8000 });
+    check("清空后回收站为空", (await api("GET", "/api/gallery/trash")).body.total === 0);
+    check(
+      "清空后卡片全部消失",
+      (await page.locator("[data-trash-item]").count()) === 0,
+      `items=${await page.locator("[data-trash-item]").count()}`,
+    );
+    check("清空后清空按钮消失", (await page.locator("button:has-text('清空回收站')").count()) === 0);
+    check("清空后摘要行消失", (await page.locator("[data-trash-summary]").count()) === 0);
+    /**
+     * 刻意**不**断空态文案出现: TrashPanel 的空态条件带 `&& !note`,
+     * 所以清空后那句"回收站已清空, 共删除 N 条"会取代它。
+     *
+     * 这是有意的优先级: 清空是用户刚做过的不可逆操作, 给一句"共删了 N 条"
+     * 比让他看见一个冷冰冰的"回收站是空的"更能确认操作成功。
+     * 早先这里等 data-trash-blank, 于是必然超时 —— 断的是一个设计上
+     * 不该出现的状态。
+     */
+    check(
+      "清空后给出结果提示",
+      ((await page.locator("[data-trash-note]").textContent()) || "").includes("已清空"),
+      (await page.locator("[data-trash-note]").textContent()) || "",
+    );
+  } else {
+    /**
+     * 有外来数据时, 仍然验「两段式确认」这个纯前端交互 —— 它点进去只进确认
+     * 态、可以取消, 全程不碰后端, 因此不需要守卫。这条断言的价值恰恰在于
+     * 它证明"破坏性操作需要用户二次确认"这个设计在有用户数据时也成立。
+     */
+    console.log(`  [warn] 回收站里有 ${foreignUi.length} 条非本脚本数据, 跳过 UI 清空, 只验确认态`);
+    check("有「清空回收站」按钮", (await page.locator("[data-trash-empty]").count()) === 1);
+    await page.locator("[data-trash-empty]").click();
+    await page.waitForSelector("[data-trash-empty-confirm]", { timeout: 5000 });
+    check("第一次点击只进确认态", (await page.locator("[data-trash-empty-confirm]").count()) === 1);
+    const beforeCancel = (await api("GET", "/api/gallery/trash")).body.total;
+    await page.locator("[data-trash-empty-cancel]").click();
+    await page.waitForTimeout(300);
+    check("取消后回收站未被清", (await api("GET", "/api/gallery/trash")).body.total === beforeCancel, `${beforeCancel} -> ${(await api("GET", "/api/gallery/trash")).body.total}`);
+    check(
+      "取消后别人的数据仍在",
+      (await api("GET", "/api/gallery/trash")).body.items.filter((x) => foreignUi.some((f) => f.job_id === x.job_id)).length === foreignUi.length,
+      `foreign=${foreignUi.map((x) => x.job_id).join(",")}`,
+    );
+  }
+} catch (e) {
+  check("脚本执行未抛异常", false, String(e && e.message ? e.message : e));
+} finally {
+  /**
+   * 收尾: 清理 + 泄漏自检, 全部交给 harness。
+   *
+   * 旧实现在这里按 `^(tr|tk|tp|tb|tu|expired)` 前缀扫, 已经是当时能找到的
+   * 最好办法了(逐个比对 created 会漏掉漏登记的 id 本身)。但前缀扫法有三个
+   * 结构性缺陷:
+   *
+   * 1. **只看前缀**。`expiredprobe01` 这种固定 id 还能撞上, 可一旦某条路径
+   *    改走 /api/capture/save(后端随机 hex), 前缀扫对它完全无感。
+   * 2. **只扫回收站和 _album.json, 不扫 outputs/ 顶层**。目录还在、只是
+   *    永久删除失败的情况被漏掉 —— 而那恰恰是贴纸册里最显眼的垃圾。
+   * 3. **不区分归属**。别人的历史残留若碰巧用了同前缀(比如另一轮也造过
+   *    `trash*`), 会被算成"我的残留"从而误报; 反过来, 换台机器前缀不同,
+   *    自己的残留又扫不到。
+   *
+   * 快照 diff 同时看这三处, 判据是"进入时没有、退出时有了", 与目录叫
+   * 什么名字无关。
+   */
+  await h.finish(entrySnapshot);
+  await browser.close();
+  h.report();
+}
 
 // ---- 小工具 ----
 async function fileExists(p) {

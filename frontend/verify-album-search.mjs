@@ -16,14 +16,20 @@
  * 注：本脚本自己造数据、自己清理，不依赖其他脚本的残留。
  */
 import { chromium } from "playwright";
+import { createHarness } from "./verifyHarness.mjs";
 
 const URL = process.env.APP_URL || "http://localhost:5173/gallery";
-const PASS = [];
-const FAIL = [];
-const check = (n, c, d = "") => {
-  (c ? PASS : FAIL).push(n);
-  console.log(`  [${c ? "PASS" : "FAIL"}] ${n}${d ? "  " + d : ""}`);
-};
+
+/**
+ * 夹具接管断言与清理。
+ *
+ * 本脚本三条 job 都由 /api/capture/save 生成, 是后端随机 hex, 目录名里没有
+ * 可识别前缀 —— 早先"逐个比对登记过的 id"的收尾自检对它们完全无感。
+ * 快照 diff 看的是"本轮期间 outputs/ 多了什么", 与目录名无关。
+ */
+const h = await createHarness("verify-album-search");
+const check = h.check;
+const entrySnapshot = await h.snapshot();
 
 const browser = await chromium.launch({
   channel: "chrome",
@@ -42,8 +48,24 @@ page.on("pageerror", (e) => console.error("[pageerror]", e));
 
 await page.goto(URL, { waitUntil: "domcontentloaded" });
 
+/**
+ * 造一条 job 并登记。
+ *
+ * 登记仍然在造数函数内部完成 —— 早先是"造完三条之后再 push", 于是造到
+ * 第二条失败时登记集合是空的, 而第一条其实已经落盘 —— 清理会拿着
+ * "undefined" 去打 DELETE(400), 真正的残留反而留着。
+ *
+ * 用 `adopt` 而不是 `adoptMarked`: 本脚本的搜索断言是**精确计数**的
+ * ("q 不命中返回空" 期望 0 条、"q 命中备注" 期望恰好 1 条)。给三条 job
+ * 打上同一个 runTag 标题, 等于往搜索索引里塞了一个所有 job 都命中的词 ——
+ * 一旦某条搜索词与 runTag 碰巧重叠(它含 6 位 base36 短码), "恰好 1 条"
+ * 会变成 3 条, 而被测代码完全正常。
+ *
+ * 详见 verify-album-meta.mjs 里同名的说明: 判断标准是"这个脚本有没有
+ * 断言 title/tags 的值或计数", 有就只能 adopt。
+ */
 async function makeJob(n) {
-  return page.evaluate(async (idx) => {
+  const id = await page.evaluate(async (idx) => {
     const c = document.createElement("canvas");
     c.width = 320;
     c.height = 400;
@@ -54,16 +76,20 @@ async function makeJob(n) {
     const fd = new FormData();
     fd.append("images", blob, `p${idx}.jpg`);
     const r = await fetch("/api/capture/save", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(`capture/save ${r.status}`);
     return (await r.json()).job_id;
   }, n);
+  return h.adopt(id);
 }
 
-const jidA = await makeJob(1);
-const jidB = await makeJob(2);
-const jidC = await makeJob(3);
-check("三条 job 创建成功", !!jidA && !!jidB && !!jidC);
-
+let jidA;
+let jidB;
+let jidC;
 try {
+  jidA = await makeJob(1);
+  jidB = await makeJob(2);
+  jidC = await makeJob(3);
+  check("三条 job 创建成功", !!jidA && !!jidB && !!jidC);
   // 造元数据：A 有独特标题，B 有独特标签，C 无元数据
   await page.evaluate(async (a) => {
     await fetch(`/api/gallery/${a}`, {
@@ -253,17 +279,28 @@ try {
   await page.keyboard.press("Escape");
   await page.waitForSelector("[data-album-save]", { state: "detached", timeout: 10000 });
   check("输入框聚焦时 Esc 仍关闭抽屉", (await page.locator("[data-album-save]").count()) === 0);
+} catch (e) {
+  // 不静默: 异常若被吞掉, run-all-verify 只能看到"少了断言", 定位成本很高。
+  check("脚本主体未抛异常", false, String(e && e.message ? e.message : e));
 } finally {
-  for (const jid of [jidA, jidB, jidC]) {
-    await page
-      .evaluate(async (j) => {
-        await fetch(`/api/gallery/${j}?permanent=true`, { method: "DELETE" }).catch(() => {});
-      }, jid)
-      .catch(() => {});
-  }
+  /**
+   * 清理 + 泄漏自检。
+   *
+   * 换用 harness 的理由, 每一个都对应旧实现的一个真实缺陷:
+   *
+   * 1. 旧 finally 走 `page.evaluate` 发 DELETE。页面若已崩/已关, evaluate
+   *    自己先抛, 整段被 `.catch(() => {})` 吞掉 —— 清理静默失败, 而汇总
+   *    早已打印完毕, 看起来是"通过了"。harness 走 node 侧 fetch。
+   * 2. 旧收尾自检用 `ids.length === 3` 当"清理成功"的旁证: 造数失败时
+   *    登记不足 3 条, 断言转红, 但那报的是"造数失败"而不是"泄漏",
+   *    真正该红的清理失效被掩盖了。
+   * 3. 旧自检在 `browser.close()` 之后探测: 页面已关, fetch 失败被吞,
+   *    两个集合都是 null, `left` 必为空 —— 这条断言**恒真通过**。
+   *
+   * harness 的快照 diff 在 node 侧读磁盘, 不受页面状态影响, 且只看
+   * "本轮期间多了什么", 登记与否都逃不掉。
+   */
+  await h.finish(entrySnapshot);
   await browser.close();
+  h.report();
 }
-
-console.log(`\nResult: ${PASS.length} passed, ${FAIL.length} failed`);
-if (FAIL.length) console.log("FAILED:", FAIL.join(" | "));
-process.exit(FAIL.length ? 1 : 0);
