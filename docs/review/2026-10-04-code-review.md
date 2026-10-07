@@ -17,6 +17,7 @@
 | 第六批 | 回收站/软删除（附修 2 个真实缺陷，见 §8） | ✅ 已修 |
 | 第七批 | 框选与 Shift 多选 + 85 项纯函数单测（见 §8.13、§8.15） | ✅ 已修 |
 | 第八批 | 删除确认改弹窗（附修 Esc 双绑数据丢失，见 §8.16） | ✅ 已修 |
+| 第九批 | `GET /api/gallery` 跳过空目录（见 §9；E2E 待跑） | 🟡 后端已验 |
 | 工具链 | `pyproject.toml`(ruff) + `frontend/eslint.config.js`(eslint 9) + `npm run lint` | ✅ 已接入 |
 
 **修复后的质量门禁**（全部通过）：
@@ -2583,3 +2584,972 @@ tsc -b --force / eslint src   0 错误
 ```
 
 287 项断言 0 失败。桌面 / 窄屏 × 空闲 / 多选四态均已真浏览器截图确认。
+
+---
+
+## 11. `GET /api/gallery` 跳过空目录
+
+- 日期：2026-10-07
+- 范围：`backend/routes/gallery.py`（`gallery()` 第一段扫描）
+- 动机：本机 `outputs/` 实测有 **6 个零文件目录**（占 78 个目录的 7.7%），它们在画廊里渲染成碎图卡片。
+
+### 11.1 空目录确实会存在，不是理论问题
+
+`capture_save` 在写入任何文件**之前**就 `mkdir`（`backend/routes/capture.py:63`）：
+
+```python
+job_dir.mkdir(parents=True, exist_ok=True)   # 先建目录
+for i, up in enumerate(images[:MAX_PHOTOS]):
+    ...
+    _check_image(data, up.content_type)       # 这里抛 400/413 → 目录已建、文件没写
+```
+
+所以「mkdir 成功但后续校验失败」或「前端建 job 后上传前中断」都会留下零文件目录。
+实测 6 个空目录时间戳集中在 20:52/20:53 整点，是验证脚本批量造的残留 —— 与上述成因一致。
+
+### 11.2 关键决策：必须放在**切片之前**
+
+第一反应是放到第二段（只探测当页 24 条），这样几乎不花钱。但**那是错的**：
+
+| | 第一段判空（本实现） | 第二段判空（被否） |
+| --- | --- | --- |
+| `total` | 72（正确） | 78（把空目录算进去） |
+| `items` | 72 | 72 |
+| `items.length === total` | ✅ | ❌ 破约 |
+
+`total` 是分页契约的核心。`verify-gallery-paging.mjs:152-154` 明确断言
+`all0.items.length === all0.total`。第二段方案会让该断言失败，且前端按 `total`
+翻页时会翻出空洞页（`has_more=true` 但返回 0 条）。
+
+**教学意义**：性能优化与正确性冲突时，先确认「谁在依赖这个字段的语义」。
+此处的依赖方不止前端，还有 27 处测试断言 —— 只看响应体大小会做出错误的取舍。
+
+### 11.3 与「不碰目录内容」优化的关系
+
+原有注释（`:541-548`）明确说第一段「只做便宜的工作，**不碰目录内容**」。
+判空必须读目录，看似破坏了它。实测代价可接受，且换来了正确的 `total`：
+
+- `next(entry.iterdir(), None)` 命中首个条目**即停**，不是完整遍历
+- 78 个目录 → 72 次 opendir，对比改前 `_pick_thumb` 的 ~670 次 glob，仍是数量级下降
+- 实测响应时间无明显变化
+
+**保留该优化注释并补充说明**，让后来者知道这是「有意识的取舍」而非「退化」。
+
+### 11.4 顺带修掉一处会误导的注释
+
+第二段原有注释写着「空目录(理论上不该出现, 目录存在必有文件)」。改动后该分支
+已不可能到达，留着会让维护者以为空目录仍会进入 items。改为说明真实语义：
+第一段已确认非空，但两次调用之间目录仍可能被清空（用户手动删/另一标签页在删），
+因此**退化而不是抛错** —— 与第一段对「中途消失」的处理保持同一态度。
+
+同时在函数 docstring 补上排除规则，明确 **items / total / tags 三者基于同一集合**。
+只让空目录影响其中之一，会让前端分页数与筛选条计数对不上。
+
+### 11.5 实测结果（8099 新进程，webui venv）
+
+```
+[1] 全量: total=72 items=72 has_more=False
+[2] items.length === total ? True
+[3] 空目录泄漏数=0
+[4] thumbs 为空条目数=0
+[5] media 为空条目数=0
+[6] 翻页累计=72 === total ? True
+[7] 跨页重复 job_id 数=0
+[8] 翻页漏掉的条目数=0
+```
+
+边界：
+
+```
+搜空目录 id 'e75652454bcb' -> total=0    # 连按 ID 搜也搜不到
+offset=999  -> items=0 has_more=False
+offset=72   -> items=0 has_more=False    # 恰好末页边界
+limit=99999 -> items=72                 # MAX_PAGE 200 上限仍生效
+limit=-5&offset=-1 -> items=72          # 负数仍静默归零
+```
+
+**零误删验证**（判断改动是否安全的核心指标）：
+
+```
+磁盘非空目录数=72
+API 返回条目数=72
+[误删] 磁盘有但 API 没有 = 0
+[多报] API 有但磁盘没有 = 0
+```
+
+动态验证：运行中新建空目录 → `total` 仍 72 且该目录不出现；删除后 → 仍 72。
+说明判空是**实时**的，非启动时缓存。
+
+### 11.6 一处排查弯路（值得记）
+
+首次验证打在 8077，结果 6 个空目录**仍然泄漏**。第一反应是「改动无效」，
+但实际是 8077 上跑着**改动前**的进程（启动于 2026-10-06 21:16，无热重载），
+我启动的新进程因端口冲突已退出。改用 8099 验证才得到上面的结果。
+
+> 教训：验证前**先确认连的是哪个进程**。uvicorn 默认无热重载，
+> 「改了代码但没重启」是最容易被误判成「代码写错了」的情形。
+
+### 11.7 门禁
+
+```
+ruff check backend scripts      → All checks passed
+compileall backend scripts      → 0 错误
+```
+
+**E2E 已补跑**（重启 8077 为新代码后，用户授权）：
+
+```
+verify-gallery-marquee      50 passed, 0 failed
+verify-gallery-paging       80 passed, 0 failed
+verify-gallery-trash        93 passed, 0 failed
+verify-album-search         35 passed, 0 failed
+verify-album-edit           29 passed, 0 failed
+verify-gallery-lightbox     47 passed, 0 failed
+verify-gallery-selection    85 passed, 0 failed
+verify-gallery-capture      11 passed, 0 failed
+verify-camera                7 PASS, 0 FAIL
+verify-burst                PASS (exit=0)
+verify-masks                22 passed, 0 failed
+```
+
+前端 348 项 + 后端 250 项，0 失败。事后核对磁盘：72 个 job 目录
+全部非空、无 mk/bt 测试残留、`api_total ==磁盘非空数 == 72`。
+
+---
+
+## 12. `capture_save` 空目录泄漏（§11 的根因侧）
+
+- 日期：2026-10-07
+- 范围：`backend/routes/capture.py`（+ `gallery.py` 一处过时注释）
+- 新增：`backend/scripts/verify_capture_rollback.py`（45 项断言）
+
+### 12.1 §11 治的是症状，这里治的是根因
+
+§11 让 `gallery()` 跳过空目录，那是**兜底**；产生空目录的代码路径一直没动：
+
+```python
+job_dir.mkdir(parents=True, exist_ok=True)   # 改前：进循环前无条件 mkdir
+for i, up in enumerate(images[:MAX_PHOTOS]):
+    ...
+    _check_image(data, up.content_type)      # ← 校验在这里才做，可能抛 400/413
+```
+
+关键点：失败时响应是**错误**，前端拿不到 `job_id`，于是残留目录成了
+**任何 API 都够不到的孤儿** —— 删不掉、查不到，只随失败次数单调堆积。
+
+§9.1 实测到的 6 个零文件目录就是这条路径的产物。§9 与本节的关系是
+「双侧夹逼」：根因堵住后，判空仍有价值（用户会自己往 `outputs/` 放东西、
+同步盘与解压工具也会留残余目录），但不再是**唯一**防线。
+
+### 12.2 三条泄漏路径，只堵了两条是不够的
+
+| 失败点 | 改前残留 | 判空能挡吗 |
+|---|---|---|
+| 第 1 张 `_check_image` 抛 400/413 | 零文件目录 | 能 |
+| 前几张已落盘、后一张失败 | **残缺**目录（有 `photo_1.jpg`） | **不能** |
+| 客户端中途断开（`CancelledError`） | 零文件或残缺目录 | **不能** |
+
+第 2 行是最隐蔽的：目录非空，`next(entry.iterdir(), None)` 判定通过，
+画廊会把它渲染成一张「只存下了 2 张照片」的假 job，而用户以为自己拍到了一组。
+**所以只做判空，等于把「我们的代码不该犯错」当成了前提。**
+
+### 12.3 方案：惰性建目录 + 异常回滚
+
+- **惰性**：`mkdir` 从「进循环前」推迟到「第一张校验通过、真的要落盘时」。
+  附带好处是首张就非法时磁盘零写入。
+- **回滚**：`except BaseException` 里调 `_rollback()` 擦掉本次痕迹。
+- **流式内存特性保留**：分块读（64KB/次）仍在循环内逐张进行，
+  内存峰值仍是单张上限而非全部张数之和。方案刻意**不**改成「先全部校验
+  再一次性 mkdir」—— 那会把 N 张全部驻留内存，与 `MAX_BYTES` 的限流意图冲突。
+
+用 `BaseException` 而非 `Exception` 是关键：`asyncio.CancelledError` 继承自
+`BaseException`（3.8+），用 `Exception` 接不住，而「传一半断了」恰是连拍
+最常见的失败方式 —— 回滚会在最需要的时候不生效。
+
+### 12.4 回滚里最危险的一行是 `rmtree`
+
+`shutil.rmtree(job_dir)` 一旦作用在**不属于本次请求**的目录上，就是把用户
+整次拍摄连根拔掉。所以 `_rollback` 用 `created_dir` 划界：
+只有**本次建的**目录才 rmtree，否则只逐个删本次写的那几个文件。
+
+判据必须在 `mkdir` **之前**算：`mkdir(exist_ok=True)` 对已存在的目录一样返回
+成功，事后再查永远是 `True`，这条保护会**静默失效**（不报错，只是开始删用户数据）。
+
+`new_job()` 用 `uuid4().hex[:12]`，撞 id 概率低到可忽略 —— 但「低到可忽略」
+不等于「发生了也没事」，且两条路径的差距是灾难性的 vs 少几张照片。
+
+### 12.5 测试先抓出了修复自身的 bug
+
+`verify_capture_rollback.py` §6 用 patch `new_job` 返回已存在 id 的方式，
+把这条低概率灾难变成**必跑**。首轮跑就红了：目录被 rmtree 掉了。
+
+原因是 `created_dir` 初值写成 `False` 后在 `mkdir` 之后无条件置 `True`，
+而 `mkdir(exist_ok=True)` 对已存在目录同样成功 —— 正是 10.4 说的那个坑，
+**注释里写了正确思路，代码却没照做**。改为在 `mkdir` 之前用 `pre_existing`
+记录，mkdir 成功后再置 `created_dir = True`。
+
+第二轮又暴露一个测试自身的缺陷：`victim.iterdir()` 在目录已被删除时抛
+`FileNotFoundError` 把脚本整个带崩 —— 崩溃栈看不出是哪条契约破了，
+正是 testing-standards §2.2 说的「销毁诊断信息」。
+
+### 12.6 测试自身踩到的隔离事故（值得记）
+
+§7 需要读 `/api/gallery`，而 gallery.py 也 `from ..config import OUTPUT_DIR`，
+**与 capture.py 各自持有独立绑定**。只 monkeypatch `cap.OUTPUT_DIR` 时，
+`/api/gallery` 扫的是**真实的** `outputs/` —— 实测读到本机 72 个真 job，
+断言表现为「画廊里出现了大量没见过的 id」，与真实原因（隔离漏了）隔了三层。
+
+测试**读**用户数据即使不删也已经是事故；更糟的是这种症状会被误判成
+「后端有问题」，进而去改生产代码。现已在脚本顶部显式注明两个模块都要改。
+
+### 12.7 门禁与变异验证
+
+```
+ruff check backend scripts      → All checks passed
+compileall backend scripts      → 0 错误
+verify_capture_rollback.py      → 45 passed, 0 failed
+verify_gallery_trash.py         → 100 passed, 0 failed
+verify_album_meta.py            → 25 passed, 0 failed
+verify_paths.py                 → 13 passed, 0 failed
+verify_share_card.py            → 67 passed, 0 failed
+```
+
+**变异验证**（确认测试不是恒真）：把 `_rollback(...)` 调用短路为
+`if False else None` 后重跑 →
+
+```
+Result: 38 passed, 7 failed
+FAILED: 中途失败 → outputs/ 逐条目无变化 | 中途失败 → photo 文件数回到基线
+       | CancelledError → outputs/ 无残留 | CancelledError → photo 文件数回到基线
+       | 撞 id 时已有文件一个都没少 | 撞 id 时本次写入的照片被回滚
+       | 画廊里只有本次明确建的两个目录
+```
+
+恰好是残缺目录、取消、撞 id 三条路径相关的断言转红，其余 38 项不受影响 ——
+说明断言钉的是机制本身，不是恰好为真的巧合。
+
+### 12.8 真实 HTTP 复核（不只信进程内 TestClient）
+
+TestClient 是进程内 ASGI，不经过真实 socket。额外用临时端口 8099 起真实
+uvicorn 打一次：
+
+```
+POST /api/capture/save  files=[("images", ("a.jpg", b"not-an-image-at-all", "image/jpeg"))]
+  → status=400    泄漏目录=无
+POST /api/capture/save  files=[]
+  → status=422    空上传泄漏=无
+```
+
+两条失败路径在真实链路上同样零残留。事后确认 `outputs/` 仍是清理后的
+72 个非空目录，无探针残留。
+
+### 12.9 顺带发现：回收站里堆了 105 项测试垃圾
+
+`outputs/_trash/` 实测 105 项，目录名全是毫秒级连号
+（`1791352227536_d60fabf38b89`…），来自 `verify-gallery-trash.mjs` 反复运行。
+
+**本次未清理** —— 回收站正是给误删兜底的地方，在没有明确授权前不动它。
+但值得记一笔：这类"测试造的数据比真实数据还多"的状态会让「回收站里
+有 105 项」这种提示失去意义，也会掩盖真正的删除记录。
+
+### 12.10 历史数据清理（经用户授权）
+
+6 个空目录已通过 `POST /api/gallery/batch-delete` 移入回收站，**可恢复**：
+
+```
+{"deleted":[6 个],"missing":[],"failed":[],"deleted_count":6,
+ "permanent":false,"purge_after_days":7}
+```
+
+选软删除而非 `rmdir`：这两个目录零字节、零元数据引用，物理删除零风险，
+但走项目自己的软删除通道零**心智**风险 —— 万一判断有误，7 天内可恢复。
+
+清理后核对：`empty_left=none`、`trash_total=111`（105+6）、
+6 个 id 均能在回收站查到、`api_total=72` 不变。
+
+> 顺序说明：清理放在代码修好**之后**。先修代码再清数据，是为了能在清理
+> 前后各验证一次 `total` 的变化（78 → 72），把「过滤逻辑生效」和
+> 「数据被删」这两件事在证据上分开。
+
+---
+
+## 13. `verify-*.mjs` 测试数据泄漏（前端侧）
+
+- 日期：2026-10-07
+- 范围：`frontend/verifyHarness.mjs`（新增）+ 10 个 `verify-*.mjs`
+- 动机：用户指出「造数据时先 mkdir 后记账，失败则漏；部分脚本完全无
+  `try/finally`」
+
+### 13.1 三个根因，不是三个 bug，是同一个病的三种症状
+
+排查后确认泄漏路径有**三条**，且此前每条都有独立的盲区：
+
+| 路径 | 表现 | 以往为什么抓不到 |
+| --- | --- | --- |
+| `outputs/<job_id>/` | 画廊多出碎图卡片 | 收尾只扫回收站，不扫顶层目录 |
+| `outputs/_trash/<ts>_<id>/` | 下次跑「清空前回收站恰有 N 条」类计数断言失败，而失败原因看起来与被测功能无关 | `permanent=true` 对源目录已不在的 id 走 missing 分支，`batch-delete` **清不到回收站里那一份**，必须逐个 `purge` |
+| `_album.json` 孤儿键 | 目录删了但元数据还在，文件单调增长 | 目录已不在，前端会丢弃孤儿，于是「看不见」 |
+
+而三条路径背后的**同一个病**是：清理逻辑写在脚本末尾的裸语句里，不在
+`finally` 中，且登记责任外置给调用方。
+
+### 13.2 最值得记的一条：**能发现问题的断法，被这个 bug 一起废掉了**
+
+`verify-gallery-paging.mjs` 有 8 处 `makeJobOnDisk()` 调用点，漏登记 6 处。
+清理只遍历 `created`，于是漏掉的那 6 个被完整跳过——回收站里躺着 3 条 `bt*`
+残留、`_album.json` 里十几个孤儿键，而**脚本全程 0 失败**。
+
+原因不只是一处漏 push，而是**收尾自检「逐个比对已登记的 id」这个断法本身**：
+漏登记的 id 根本不在比对集合里。于是自查与被查对象来自同一个有缺陷的来源，
+**一个 bug 同时让泄漏发生、让泄漏不可见**。
+
+> 这与 §8.15 那次「全绿的断言可能只是没测到」是同一条教训的加强版：
+> 不只「断法太松」，而是**断法的输入来自被测的那段逻辑**，于是它必然一致地错。
+> 判据必须**独立于**被测逻辑——这正是改用「进入时没有、退出时有了」的
+> 快照差值的理由：它的输入是文件系统的事实，不经过任何一处可能漏的登记。
+
+### 13.3 方案：`verifyHarness.mjs`，把泄漏变得**可观测**
+
+不是「记得清理」，而是让残留**必然被外部发现**。三个机制：
+
+1. **`makeJobOnDisk` 内部强制登记**——登记发生在 `mkdir` 成功后的**第一步**，
+   早于 `writeFile`。调用方根本没有「登记」这个动作可漏。
+2. **快照差值取代「我认为清干净了」**——`snapshot()` 拍 `outputs/` 目录 +
+   回收站 job_id + `_album.json` 键；`finish()` 在清理**之后**再拍一次求差。
+   判据是「磁盘回到了进入前的状态」，与目录叫什么名字无关。
+3. **SIGINT/SIGTERM 兜底**——`rmSync` 同步删已登记项。刻意注明它**不能替代**
+   差值断言：进程被强杀时监听根本不触发。
+
+#### 关键设计决定：为什么是「清理 → 补救 → 终检」三段
+
+最早的设计是「先自检再清理」，实跑 `verify-gallery-paging` 立刻出问题：它正常
+就要造 8 个 job 放进 `outputs/`，于是自检必然报 3 条 FAIL，而磁盘其实是**按设计**
+脏的。
+
+根因是「本轮新增了目录」这件事**无法**区分两种情况——脚本正在正常造数（接下来会
+删掉）与脚本漏了清理（没人会删）。在清理发生之前，两者的磁盘状态**完全一样**，
+没有任何信号能区分。
+
+所以拆成两种用途：
+
+- **中间 diff**（清理前）：只用来**找漏网**并补救。它抓到的集合里混着「已登记的」
+  与「没登记的」，前者本就该删。对已登记的那些不报警——报了就是噪声。
+- **终检 diff**（补救后）：才是断言。此时仍有残留，就是清理真的失败了。
+
+保留中间快照的价值：补救要靠它才知道**该删什么**。若只做终检，漏登记的残留永远
+查不出来——而那正是本项目反复中招的那一类。
+
+### 13.4 途中发现的第二类缺陷：**恒真的断言**
+
+`verify-share-card.mjs` 的收尾自检跑在 `browser.close()` **之后**。
+`page.evaluate` 在页面关闭后抛 `Target page, context or browser has been closed`，
+被 `.catch(() => null)` 吞成 `null`——于是两个探测结果都是 `null`，比对集合必然
+为空，**断言永远通过**。
+
+它看起来在防泄漏，实际什么都防不了。这类错误比「没有断言」更危险：没有断言会
+让人补一个，恒真的断言会让人以为已经处理过了。
+
+harness 的快照差值全部走 **Node 侧 `fs`**，不使用 `page`，因此不受页面状态影响。
+
+> 判据：一个从没红过的断言，无法与「删掉它结果完全一样」区分开。
+> `verify-harness-selftest.mjs` 就是为此存在——它刻意造出真实泄漏，
+> 断言必须变红；修复后必须变绿。**只验「正常路径是绿的」等于没验。**
+
+### 13.5 迁移中修掉的四类具体问题
+
+| 脚本 | 问题 | 修法 |
+| --- | --- | --- |
+| `harness` | `makeJobOnDisk` 是 `mkdir → writeFile → track`，正是本任务的核心根因 | `track` 前移到 `mkdir` 之后第一步 |
+| `lightbox` | `capture/save` 与 `layout/make`/`share/save`/`PATCH` 在**同一次** `page.evaluate` 里，后者抛错时 `job_id` 锁在浏览器上下文，Node 侧 `createdIds` 为空 | 拆成 `makeJobBase()` + `addLayoutAndShare()`，登记只依赖 `capture/save` 的返回值 |
+| `album-edit` | 创建 job 与 `PATCH` 同一趟 | 同上，拆开；**先登记再 PATCH** |
+| `album-search` | 三次造数在 `try` **之外** | 移入 `try`；补 `r.ok` 检查，避免失败响应被解析成 `undefined` |
+| `album-meta` | 存在从不使用的 `cleanup = []` 死数组 | 删除 |
+| `trash` | 白名单从脚本自维护的 `created` 取，与 harness 那份**可能不一致** | 新增 `h.tracked()` 返回登记快照，消除「两份登记」 |
+| `trash` | 路径穿越用的 `evilDir` 无 `try/finally`，`api()` 抛错就跳过 `rm`，在 `_trash` 留一个名字带 `..` 的目录——而它恰是后端要忽略的形态，**残留时看不出来** | 加局部 `finally` |
+| `marquee` | 收尾按 `^mq<run>` 前缀扫回收站 + `_album.json` | 换快照差值（前缀法只看回收站、不看顶层目录、不区分归属） |
+
+### 13.6 刻意**不做**的事
+
+- **不按模糊前缀清扫历史 `outputs/`**。用户自己的 12 位 hex `job_id` 与测试造的
+  hex 在磁盘上完全同构，靠猜清理就是在赌用户的数据不重要。宁可少清，不能误删。
+- **不运行 `sweep`**。`verifyHarness.mjs` 导出了 `sweep()`，但历史数据清理需用户
+  另行授权。
+- **不引入新依赖**。夹具只用 `node:fs` / `node:path` / 原生 `fetch`。
+- **不改动被测的前后端代码**。本次只动测试基础设施。
+
+### 13.7 覆盖面：10 个落盘脚本全部纳入，15 个确认无需纳入
+
+全量扫描 25 个 `verify-*.mjs`，按「是否产生持久化 job」分类：
+
+**已接入 harness（10）**：`gallery-trash` / `gallery-paging` / `gallery-marquee` /
+`gallery-lightbox` / `album-meta` / `album-search` / `album-edit` /
+`share-card` / `decorate-persist` / `harness-selftest`
+
+**确认无需接入（15）**：`camera` / `burst` / `mask-preview` / `mask-output` /
+`mask-tabs` / `mask-gallery` / `masks` / `gallery-capture` / `gallery-selection` /
+`reduced-motion` / `retake-bar` / `sticker-edit` / `era-e2e` / `doodle-burn` /
+`sweep`
+
+判定依据：`DecoratePage.tsx` 的 `makeLayoutToJob()` 只在**存在 `jobId`** 时才写
+`outputs/{jobId}/layout.jpg` 与 `share.jpg`。`verify-era-e2e` / `verify-doodle-burn`
+等只向 store 注入内存 blob 帧且无 job ID，因此**不落盘**。
+
+### 13.8 门禁
+
+```
+node --check (全部 28 个 .mjs)        → 0 语法错误
+tsc -b --force                        → 0 错误
+eslint . （实际覆盖 28 个 .mjs）      → 0 错误
+```
+
+**未执行**：Playwright 端到端回归（需起后端 8077 + 前端 5173）。
+本次改动**只影响测试脚本自身**，不改被测代码，但 `verify-gallery-trash` 的收尾
+从「前缀扫」换成「快照差值断言」后**断法变严**，需要在服务起来后实跑确认——
+特别是它那条「清空回收站后 total 为 0」的断言，与新增的终检 diff 可能存在
+交互（脚本中段自己会清空回收站，快照基线拍在进入前，理论上应当一致）。
+
+> 待办：起服务后至少跑项目规则列出的 8 个脚本 + 本次改动的 10 个，
+> 重点确认 `verify-gallery-trash` 与 `verify-harness-selftest`。
+
+### 13.9 补跑门禁：Playwright 回归（13.8 的待办已了结）
+
+起后端 8077 + 前端 5173 后实跑。
+
+**项目规则指定的 8 脚本 / 144 项断言**：
+
+```
+verify-camera.mjs            7 passed  0 failed
+verify-burst.mjs             1 passed  0 failed   (见 13.11)
+verify-mask-preview.mjs     14 passed  0 failed
+verify-mask-output.mjs      37 passed  0 failed
+verify-mask-tabs.mjs        21 passed  0 failed
+verify-mask-gallery.mjs     31 passed  0 failed
+verify-masks.mjs            22 passed  0 failed
+verify-gallery-capture.mjs  11 passed  0 failed
+----------------------------------------------
+TOTAL                      144 passed  0 failed
+```
+
+**本次改动的脚本**：
+
+```
+verify-harness-selftest.mjs    4/4 OK (故障注入, 见 13.4)
+verify-decorate-persist.mjs   25 passed  0 failed
+verify-share-card.mjs         23 passed  0 failed
+verify-gallery-paging.mjs     81 passed  0 failed
+verify-gallery-marquee.mjs    51 passed  0 failed
+verify-gallery-trash.mjs      94 passed  0 failed
+verify-album-meta.mjs         34 passed  0 failed   (见 13.10)
+verify-album-search.mjs       38 passed  0 failed   (见 13.10)
+verify-album-edit.mjs         29 passed  0 failed   (此结果不可信, 见 13.15)
+verify-gallery-lightbox.mjs   50 passed  0 failed
+```
+
+**静态门禁**：`node --check` 14 个改动文件全过；`tsc -b --force` 0 错误；
+`eslint` 0 错误；`ruff check backend scripts` -> `All checks passed!`；
+`compileall` 0 错误。
+
+**终态**：`outputs/` 顶层 80 目录、`_trash` 0 条、`_album.json` 1 键。
+
+> `npm run lint` 实际是 `eslint src`，**只覆盖 `src/`**。本任务的三个新文件
+> （`verifyHarness.mjs` / `verify-sweep.mjs` / `verify-harness-selftest.mjs`）
+> 都在 `frontend/` 根目录，**不在它眼里**。所以额外手工跑了
+> `npx eslint <根目录 .mjs>` 补上这个盲区。
+> 这与项目规则里「ruff 规则集很窄，通过不代表没风格问题」是同一类陷阱：
+> **门禁覆盖不到的文件，等于没有门禁。**
+
+### 13.10 本轮真实回归：`adoptMarked` 毁掉了被测前置条件
+
+`verify-album-meta` 接入 harness 后报：
+
+```
+[FAIL] 无元数据条目 title 缺省为空串
+[harness] 发现 1 条未登记的残留, 强制清理: f27530c1a617
+```
+
+残留是 12 位 hex —— 正是 `adoptMarked` 造的。根因不是清理漏了，而是**纳管动作
+本身污染了断言对象**：`adoptMarked` 会 PATCH 写入 `title=runTag`，而这条断言
+检查的正是「没有元数据的条目 title 应为空串」。纳管让前置条件消失，于是断言
+失败，而**后端行为完全正确**。
+
+`verify-album-search` 有同一类风险，只是这轮侥幸没触发：它有多条精确计数断言
+（「q 命中备注」期望 `length === 1`、「q 不命中返回空」期望 0）。给三个 job 打上
+同一个 runTag，等于往搜索索引里塞了一个**所有 job 都命中**的词；一旦某条搜索词
+与 runTag 碰巧重叠，计数就会变。**没红不等于安全**，那只是运气。
+
+两处都改回 `adopt`（只登记、不写元数据）。判据写进了 harness 的 API 文档：
+
+> **脚本里有没有断言 title/tags 的值或数量？有，就只能用 `adopt`。**
+> `adopt` 少的那点追溯能力，由 `finish()` 的快照终检兜着，不会因此泄漏。
+
+教训：**纳管不是隐式无害的**。harness 自己的登记确实只往内存 `Set` 加个 id，
+但「顺手打个标记」这个便利会写 `_album.json`。给测试工具加便利时，必须先问
+它会不会改变被测对象的状态。
+
+### 13.11 两处截图路径依赖 CWD，其中一处还静默吞错
+
+`verify-burst.mjs` / `verify-retake-bar.mjs` 都往 `outputs/_verify/` 写诊断截图，
+路径写的是 `"../outputs/_verify/xxx.png"` —— **只在 CWD 恰好是 `frontend/` 时成立**。
+从仓库根跑就落到错误位置（还不存在，于是 ENOENT），而失败信息指向路径，
+不指向「你在错误的目录里跑了我」。
+
+`retake-bar` 更糟一层：
+
+```js
+await page.screenshot({ path: "../outputs/_verify/retake-bar.png" }).catch(() => {});
+```
+
+`.catch(() => {})` 把失败**完全吞掉** —— 脚本报告通过，截图根本没生成，而这个
+截图恰恰是人工复看 pose/RetakeBar 布局的唯一凭据。**静默失败比没有截图更坏：
+它让人以为看过了。**
+
+改法（两处相同）：
+
+1. 从 `import.meta.url` 推导绝对路径，不依赖 CWD；
+2. 截图前 `mkdirSync(dirname, { recursive: true })` —— **Playwright 不会自动创建
+   父目录**，目录不存在直接 ENOENT；
+3. `retake-bar` 的 `.catch` 换成 `try/catch` + 可见告警，且**不计入 PASS/FAIL**：
+   截图是 teardown 期的诊断产物，失败要看得见，但不该盖掉主体真正的失败原因；
+4. `burst` 里 `existsSync("node_modules/playwright")` 同样依赖 CWD，从仓库根跑会
+   误判成「没装」从而静默 `process.exit(0)`。换成 `createRequire(import.meta.url).resolve()`。
+   **一个从不执行的验证脚本，比失败的更危险。**
+
+> 这四个坑有个共同形状：**失败被写在错误的地方，于是没人看见。**
+
+### 13.12 一处**不是**回归的失败，以及它暴露的真问题
+
+`verify-album-edit` 首跑报 4 失败（`取消收藏后徽标消失 1 -> 1`、`后端列表不再含该 job`、
+`删除后进了回收站`、404）。`git stash` 却说 *No local changes to save*，重跑 29/0 全绿。
+
+结论：不是 harness 引入的，是**上一轮 `album-search` 的残留状态**撞掉了它。
+该脚本依赖「favorite 置顶 -> 我们的 job 排列表第一」这个假设，
+而 `starCount` 数的是**整页** 星标而非本 job；一旦别的脚本留下 favorite 条目，
+排序假设失效，删除操作就打在了错误的对象上（于是 404 + 列表/回收站断言同时失败）。
+
+这是**跨脚本的顺序耦合**，与 harness 无关，属于这些脚本既有的脆弱性。记录在此
+是因为它极像回归：失败项集中在删除流程、报错是 404、且**只在连续跑多个脚本时
+出现**。单跑一个脚本永远看不到。
+
+> 判据：只在「连着跑」时出现的失败，先怀疑状态污染，再怀疑代码。
+> `git stash` 前后各跑一遍是最快的区分手段。
+
+> ⚠️ **本节的结论后来被推翻，见 13.15。** 「跨脚本顺序耦合」只是表象：
+> `git stash` 说 *No local changes to save* 是因为 `verify-album-edit.mjs`
+> **从未被迁移过**（它不在 `git status` 的改动列表里），所以 stash 无从收起它。
+> 真实原因是脚本用 `.first()` 按位置点击，在 79 条真实数据的仓库里
+> **删掉了用户的照片**。本节保留原文是为了记录「症状极易伪装成环境问题」
+> 这一失败模式本身 —— 差一点就让它蒙混过关。
+
+### 13.13 `verify-sweep` 的文档承诺与实现对齐
+
+原文档写了 `--all-hex`，实现里没有这个参数 —— 文档承诺了不存在的能力。
+**已实现为只读列举**（`listHex`），形态依据 `backend/jobs.py` 的
+`uuid.uuid4().hex[:12]`：
+
+- 只 `console.log` 列出，**绝不加进 `targets`**，因为无标记 hex 与用户真实 job
+  完全同构，判定归属需要脚本手里没有的上下文（拍摄内容、时间）；
+- 删除权留在人手里：到画廊里一眼确认再处理。
+
+### 13.14 本轮新增文件
+
+| 文件 | 作用 |
+| --- | --- |
+| `frontend/verifyHarness.mjs` | 共享夹具：造数/纳管/清理/快照终检 + `sweep()` |
+| `frontend/verify-harness-selftest.mjs` | 故障注入自测，5 用例（见 13.4、13.16） |
+| `frontend/verify-sweep.mjs` | 历史残留 dry-run / 显式删除入口 |
+
+历史数据**仍未清理**：需用户另行授权（见 13.6）。
+
+---
+
+### 13.15 修正 13.12 的结论：**不是状态污染，是脚本在删用户的照片**
+
+13.12 把 `verify-album-edit` 的失败归因为「上一轮 album-search 的残留状态撞掉了它」。
+那个结论是**错的**，而且错得危险 —— 它把一个数据破坏缺陷记成了偶发环境问题。
+
+实际情况：`git status` 显示 `verify-album-edit.mjs` **根本没被迁移过**。它仍是旧模式：
+
+```js
+const jid = await page.evaluate(async () => {
+  // capture/save + PATCH 塞在同一个 evaluate 里
+});
+await page.locator("button.relative").first().click();   // ← 按位置点第一张卡
+```
+
+`.first()` 的含义是「**列表里第一张卡**」，不是「我造的那条」。在空环境里两者恰好
+相等，于是长期 0 失败。而本机 `outputs/` 有 **79 条 job**、`PAGE_SIZE` 只有 24：
+
+1. 脚本 PATCH 了**用户的**某条 job（改了 title/note/tags/favorite）；
+2. 点「删除这条」→ 确认 → 把**用户的照片移进回收站**；
+3. purge 掉了它 —— 不可恢复；
+4. 跑出来 5 条 FAIL，而**被测代码完全正常**。
+
+实测确认了这一点：首次运行后 `12f9c72838cc` 与 `973b097f33bc` 两个 id 在 API、
+磁盘、回收站三处**均已不存在** —— 它们已被脚本自身的删除流程物理清除。
+
+> 这比「测试数据泄漏」严重一个量级。泄漏是留下垃圾，这个是**销毁用户数据**，
+> 而且发生在断言全绿的脚本里。
+
+#### 修法：三条一起上，缺一条仍会漏
+
+| 措施 | 单独做为什么不够 |
+| --- | --- |
+| 用 `h.runTag` 造**唯一** title | 旧数据可能同名，`firstCardText.includes("待编辑")` 仍假通过 |
+| 搜索框按 title 过滤，收敛到唯一一条 | 只收敛候选集，后续仍可能按位置点 |
+| 一律 `button[data-job-id="${jid}"]` | 缺前两条时，若邻居也 favorite 仍会错位 |
+
+顺带修掉三个连带问题：
+
+- **PATCH 从不检查 `response.ok`**：capture 与 PATCH 挤在一个 `evaluate` 里，PATCH 4xx
+  了脚本照走，最终炸在「后端 favorite 已取消」这种与真实原因无关的断言上。
+- **初始 `page.goto(URL)` 缺失**（迁移时漏写）：`makeJob` 用相对路径 `/api/capture/save`，
+  停在 `about:blank` 时 origin 为 `null`，`fetch` 直接抛 `Failed to parse URL`。
+- **保存后搜索条件过期**：标题改掉后旧搜索词不再命中，卡片被过滤掉，
+  `waitFor` 超时 —— 报成「卡片显示新标题失败」，真因是上一步查询条件没更新。
+
+结果：`29 passed` → **`34 passed, 0 failed`**（新增 5 条：搜索收敛、删除段同一条、
+徽标按本卡断等）。
+
+> 判据：**`.first()` / `.nth()` / 固定文本，在有用户数据的仓库里是数据破坏**。
+> `outputs/` 是用户的真实相册，不是测试沙箱。凡是按位置定位的断言，
+> 都要先问一句「这条凭什么是我造的」。
+
+### 13.16 harness 自身的误删风险：**只报告不删除**
+
+`finish()` 早先对所有「入口没有、现在有」的目录一律 `forcePurge`。这个推理在独占
+环境成立，在共享环境**不成立**：脚本运行那 30 秒里用户新拍一张照片、或另一个 verify
+进程在造数，它们在磁盘上的形态与「漏清理的残留」**完全同构**。于是 harness 会理直气壮
+地删掉用户的照片，并且**每一项断言都还是绿的**。
+
+可信的归属证据只有一种：**id 里带着本次运行的短码**（`makeJobOnDisk` 造目录必然含
+`runCode`）。据此分两路：
+
+| 类别 | 判据 | 处理 |
+| --- | --- | --- |
+| 本轮漏登记 | 含 `runCode` | `forcePurge`（删它没有疑问） |
+| 来源不明 | 随机 hex，不含 `runCode` | **只报告，不删，不判失败** |
+
+配套新增 `BIGHEAD_VERIFY_LEAK_MODE` 三档，默认最保守：
+
+- `report`（默认）：只报告。**最坏结果是留几个目录被人看见。**
+- `strict`：报告并判失败，给 CI / 独占沙箱。
+- `purge`：报告并强删。⚠️ 在有用户数据的机器上打开 = 授权 harness 删别人的照片。
+
+同时把终检也做了对应扣减 —— 否则「刻意不删」的条目会在终检变成 3 条 FAIL，
+默认档位形同虚设。
+
+#### 告警与失败必须分开
+
+`report()` 新增 `WARN:` 行且**不影响退出码**。判红等于「这次回归不通过」，
+而来源不明的残留很可能根本不是脚本造的。让别人的数据把测试跑红，只会训练出
+「看到红字就跳过」的习惯 —— 那比留几个目录严重得多。
+
+#### 自检随之改，并补一条孪生用例
+
+改 harness 的归属判定后，`selftest` 用例 2 立刻报 `BROKEN`：它造的
+`stB${Date.now()...}` 不含 `runCode`，被正确归入「来源不明、不自动删」。
+
+这个失败**不是 harness 坏了**，是自检与 harness 约定脱节 —— 用例名说
+「验证本轮漏登记被补救」，实际测到的是「陌生数据只报告」。用例名与所测行为
+对不上，本身就是一条废断言。改成 `stB${h.runCode}...` 后恢复原意。
+
+并**新增用例 2b**（钉住新边界）：造一条 12 位随机 hex，必须断言它
+① 没被自动删除 ② 不判失败 ③ 有告警记录。没有这条，「只报告不删」就没有任何
+验证 —— 哪天有人改回去把新出现的目录一起清掉，不会有任何测试变红。
+
+`4/4` → **`5/5 OK`**，且退出码干净（`EXIT=0`，未触发 libuv `UV_HANDLE_CLOSING`）。
+
+### 13.17 `trash/empty` 是全局不可逆操作，此前无任何守卫
+
+`verify-gallery-trash.mjs` 直接调 `POST /api/gallery/trash/empty` —— 它清空**整个**
+回收站，无逐条选择、无确认弹窗、无二阶。跑它时若用户回收站里有自己 30 天内不想丢的
+照片，这一行会**永久删掉它们**，而脚本 0 失败。
+
+之所以一直没人发现：本机跑它时回收站恰好是空的，于是「清空」在测试期间没有可观测
+后果。而**恰好为空**是运气，不是前提。
+
+守卫判据不是「跑之前回收站是不是空的」，而是「**每一条都能证明是本脚本造的**」：
+用 `h.tracked()` 拿白名单（与清理系统同一份集合，不另维护一份 `created`）。
+出现外来条目就整段跳过，`trash/empty` 降级为**逐条 purge**（语义等价、不误伤）。
+
+UI 上的「清空回收站」按钮调的是同一个接口，**必须重新判定一次** ——
+守卫放在段首时回收站可能恰好是空的，拦不住后面这段。
+
+连带处理两处**依赖「回收站为空」前提**的断言段：
+
+- 空态段（`data-trash-blank` / 无清空按钮 / 无摘要行）改为条件执行；
+- UI 清空段在守卫触发时只验「两段式确认」这个**纯前端**交互（点进去只进确认态、
+  可取消、全程不碰后端），并额外断言「取消后别人的数据仍在」。
+
+#### 一个方向性错误：守卫触发不该判失败
+
+第一版把守卫写成 `check("清空前回收站里没有非本脚本的条目", mayEmpty)`，
+于是在污染环境下脚本红 2 条。这等于在说：**环境越脏，这个脚本越不可能通过** ——
+于是大家会去清空用户的回收站来「让测试变绿」。**奖励与目标完全相反。**
+
+改成 `console.log` 报告事实 + 安全降级 + 断言降级后仍成立。
+
+#### 实测验证（不是推理，是跑出来的）
+
+| 环境 | 结果 | 用户数据 |
+| --- | --- | --- |
+| 干净（回收站基线 0） | **94 passed, 0 failed** | — |
+| 污染（注入真实 job `57e3b9d599f4` 软删除） | **85 passed, 0 failed** | ✅ **全程存活** |
+
+污染环境那次两处破坏性清空都被拒绝并降级，随后用 `restore` 把
+`57e3b9d599f4` 完整恢复，`gallery=79 / trash=0 / 磁盘 79 目录`，与基线一致。
+
+> 判据：**破坏性操作的前置条件，必须由「归属」而不是「当前恰好为空」来保证。**
+> 「恰好」是最脆弱的工程假设，因为它成立与否取决于用户上一次随手删了什么。
+
+### 13.18 回归与终态
+
+**harness 改动影响全部已迁移脚本，故全量重跑**（不能只跑改动的那几个）：
+
+```
+verify-gallery-lightbox.mjs   50 passed  0 failed
+verify-gallery-marquee.mjs    51 passed  0 failed
+verify-gallery-paging.mjs     81 passed  0 failed
+verify-gallery-trash.mjs      94 passed  0 failed   (污染环境下 85/0, 见 13.17)
+verify-album-edit.mjs         34 passed  0 failed   (见 13.15)
+verify-album-meta.mjs         34 passed  0 failed
+verify-album-search.mjs       38 passed  0 failed
+verify-share-card.mjs         23 passed  0 failed
+verify-decorate-persist.mjs   25 passed  0 failed
+verify-harness-selftest.mjs   5/5 OK               (见 13.16)
+----------------------------------------------
+退出码全部为 0，无回归
+```
+
+**终态核验**（跑完立即查，确认无泄漏、无误伤）：
+
+```
+gallery=79 (基线 79)   trash=0   磁盘 job 目录=79   测试前缀残留=0
+```
+
+**静态门禁**：4 个改动文件 `node --check` 全过。`frontend/src` 与 `backend/`
+本轮未改动（`git status` 确认），故 `npm run lint`（实为 `eslint src`）
+的覆盖范围与结论不受影响。
+
+---
+
+## 14. 修正 §13.7：三个脚本的「无需接入」判断是错的
+
+- 日期：2026-10-07
+- 范围：`frontend/verifyHarness.mjs` + `verify-era-e2e.mjs` /
+  `verify-doodle-burn.mjs` / `verify-sticker-edit.mjs`
+- 动机：用户指出这三个脚本每次运行都泄漏 job
+
+### 14.1 §13.7 的判定依据本身不成立
+
+§13.7 把这三个脚本列进「确认无需接入」，理由是：
+
+> `DecoratePage.tsx` 的 `makeLayoutToJob()` 只在**存在 `jobId`** 时才写
+> `outputs/{jobId}/layout.jpg`。这几个脚本只向 store 注入内存 blob 帧且无 job ID，
+> 因此**不落盘**。
+
+前半句是对的，**推论是错的**。同一个 `doLayout()` 里，在调用
+`makeLayoutToJob()` **之前**先跑了这一行：
+
+```ts
+const cap = await saveCaptures(finalBlobs);   // POST /api/capture/save
+const result = await makeLayoutToJob(finalBlobs, cap.job_id, layout, frameOverride);
+```
+
+`saveCaptures()` 走 `/api/capture/save`，后端 `new_job()` 生成 12 位随机 hex 并
+`mkdir`。**job 是在这一步诞生的，与后续有没有 layout 无关。**
+
+漏判的形状很典型：**只检查了「写文件」那一环，没检查「创建 job」那一环。**
+两者被同一个 `cap.job_id` 串在一起，而 `job_id` 的来源在前一步。
+
+| 脚本 | 点击「生成拼图」次数 | 原每轮泄漏 |
+| --- | --- | --- |
+| `verify-era-e2e.mjs` | 2（`vintage_2000` / `modern`） | 2 |
+| `verify-doodle-burn.mjs` | 3（基线 / 成片 / 边缘裁切） | 3 |
+| `verify-sticker-edit.mjs` | 3（基线 / 烧录 / 裁切） | 3 |
+
+而这三个脚本原本**完全没有清理逻辑**（不在 §13 迁移的 10 个之列），
+尾部只有 `PASS`/`FAIL` 汇总。所以每次跑都稳定漏 2~3 个 job。
+
+### 14.2 为什么不能沿用既有办法：从 `layoutUrl` 反解 id 太晚
+
+最省事的做法是等 `setLayoutUrl('/outputs/{id}/layout.jpg')` 生效后从 URL 取 id。
+问题是 120 秒等待里**任何一次超时或异常**都会跳过它 —— 而那正是泄漏最严重的
+场景。**用「跑完」作为「登记成功」的前提，等于把最需要清理的路径排除在清理之外。**
+
+正确做法是把登记时点前移到 job 诞生的那一刻，即 `watchCapturedJobs()`：
+
+```js
+page.on("response", (res) => {
+  if (res.request().method() !== "POST") return;
+  if (!res.url().includes("/api/capture/save")) return;
+  const p = res.json().then((b) => (b?.job_id ? adoptMarked(b.job_id) : undefined));
+  inFlight.add(p);
+});
+```
+
+监听的是**被测代码真实发出的请求**，不依赖脚本从任何 UI 状态反解。
+
+### 14.3 真正的坑：Playwright **不会** await 异步事件处理器
+
+`response` 处理器要 `await res.json()`，而 Playwright 只负责调用它、**不等待它完成**。
+于是存在这个交错：
+
+```
+主体跑完 → finish() 开始清理 → handler 才刚拿到 body 并登记
+```
+
+清理早已过去，那个 job 逃出本轮清理，变成下次运行的历史垃圾。**且不会让任何
+断言变红** —— 与 §13.4 的恒真断言同属「静默失败」。
+
+修法是把在飞的 Promise 记进 `inFlight`，`finish()` 在 `cleanupRegistered()`
+**之前** `await Promise.all`。顺序是硬要求：先清理再 drain 等于没 drain。
+代码里为此写了两处注释互相印证（`watchCapturedJobs` 的模块注释 + `finish()` 第 0 步）。
+
+### 14.4 `mark=true` 为什么对这三个脚本安全
+
+`watchCapturedJobs` 默认 `mark=true`（调 `adoptMarked`，PATCH 写 `title=runTag`）。
+§13.10 刚因为 `adoptMarked` 污染前置条件而把两个脚本改回 `adopt`，这里又开了 ——
+
+判据与 §13.10 一致：**脚本里有没有断言 title/tags 的值或数量**。
+这三个只做像素级断言（涂鸦/贴纸/era 有没有烧进成片），不碰元数据。
+留下的 runTag 让「清理也失败」的极端情况能用 `?q=<runTag>` 找回，
+不必人工翻 `outputs/` 猜哪个 hex 是测试留下的。
+
+### 14.5 读不到 body 时为什么不猜 id
+
+`res.json()` 失败时不报错、不猜测，直接放弃登记。**这一刻 job 可能已经建好**
+（200 但 body 读不出来），而我们无法证明它属于本轮还是属于用户 ——
+凭空造个 id 去删才是 §13.16 那个危险动作。
+
+放弃登记后由 §13.16 的快照终检接手：列为「来源不明的残留」，默认档位只报告、
+不删除、不判失败。**保守是对的默认值**：最坏结果是留几个目录被人看见。
+
+### 14.6 负对照：证明修复真的有效
+
+全绿不证明修复有效（§8.15、§13.4 同一条教训）。临时复制
+`verify-era-e2e.mjs` 并删掉 `h.watchCapturedJobs(page)`：
+
+```
+[harness][warn] 2 条来源不明的残留
+Result: 22 passed, 0 failed
+dirs: 87 -> 89      leaked: 2
+```
+
+仍是 22/0 全绿 —— **断言抓不到这个缺陷，正是它长期存在的理由**。
+接上 watcher 后：`dirs: 85 -> 85`，`leaked: 0`。
+
+这条负对照产生的 2 个 job 已确认归属后手工清除（先查 `/api/gallery` 核实，
+再 permanent batch-delete + 逐项 purge）。
+
+### 14.7 一处**不是**回归的失败
+
+全量回归中 `verify-gallery-trash.mjs` 一度报 2 失败
+（「画廊顶部有回收站入口」元素找不到、`goto()` 后立即查询超时）。
+排查：确认 `GalleryPage.tsx` 的 `[data-trash-open]` 存在，独立 Playwright 在
+默认视口与脚本的 1280×900 下都能读到；临时注释掉本次新增的
+`await drainWatchers()` 仍得到**完全相同**的两个失败；恢复后完整套件中该脚本
+`94 passed, 0 failed`。
+
+结论：脚本 `goto()` 后立即查询的加载竞态，与本次改动无关。**判定手段是
+「把新加的那一行去掉，症状是否变化」** —— 不变即可排除，比读代码可靠。
+
+### 14.8 门禁
+
+```
+node --check ×4 改动文件              → 0 语法错误
+tsc -b --force                       → 0 错误
+eslint src                           → 0 error
+verify-harness-selftest.mjs          → 5/5 OK
+
+verify-era-e2e.mjs                   22 passed, 0 failed   dirs 85 -> 85
+verify-doodle-burn.mjs                61 passed, 0 failed   dirs 85 -> 85
+verify-sticker-edit.mjs              72 passed, 0 failed   dirs 85 -> 85
+
+run-all-verify.ps1（22 个脚本全量）    790 passed, 0 failed  ALL GREEN
+```
+
+三个脚本各自新增的终检三项均 PASS：`outputs/` 回到进入前状态 /
+回收站回到进入前状态 / `_album.json` 无新增孤儿键。
+
+> 目录计数用**同一条命令内**的「跑前 → 跑后」自包含比对。曾试过把基线写到
+> `%TEMP%\bh-baseline.txt`，第二次该文件只剩一行 `qwen_e2e_24397` ——
+> 有并发验证进程覆盖同名文件。**跨命令持久化的基线会被别的进程改掉**，
+> 证据链必须活在同一次执行里。
+
+### 14.9 教训
+
+§13.7 的「已排查完毕，无需接入」是一句**写在文档里的错误结论**，比没有结论
+更危险：它让人以为覆盖度已经穷尽。而它的错误形态很朴素 —— 追查「文件写到哪」
+时没有回头看「job 从哪来」。
+
+> 判据：判定「某路径不落盘」时，要看**创建者**而不是**写入者**。
+> 数据在系统里有多个诞生地点，只查其中一个就会漏。
+
+### 14.10 收尾核查：计数从 85 变成 87，追下去发现是**自己**留下的
+
+准备交付时核对终态，发现 `outputs/` 是 **87** 个目录，而 §14.8 记录的是 85。
+按 §14.6 的教训（数字对不上就是有问题），逐项追查：
+
+```
+17:33:54-56  fde255199ad7 82eb6ca28408 facb94895e84   ← 3 个
+17:34:14-16  9efbd3b7359f c80993a55d49 9ab90fc90a52   ← 3 个
+17:43:59-00  f4e489c89401 881e3e02dc53               ← 2 个
+```
+
+**3 + 3 + 2，与三个脚本的点击次数逐一吻合。** 若只是巧合，未免巧得过分。
+
+但它们**不是**当前代码泄漏的，证据是当场实测：以自包含计数跑一遍
+`verify-era-e2e.mjs` → `BEFORE=87 / AFTER=87 / DELTA=0`，终检三项全 PASS。
+
+进一步查这 8 个的归属，四项独立证据都指向「本轮调试期产物」：
+
+| 证据 | 结果 | 说明 |
+| --- | --- | --- |
+| `title` / `tags` | 全空 | 经过 `adoptMarked` 的必然带 runTag |
+| `_album.json` | **文件不存在** | 连元数据容器都没有 |
+| 像素采样 | 纯灰 `(128,128,128)` | 正是 `verify-era-e2e` 的 `fillStyle=rgb(v,v,v)` 合成帧 |
+| `verify-sweep` | 命中 0 | 连项目自己的清扫工具都判「无法证明归属」 |
+
+真实拍摄不会是无标题、无元数据、纯灰的 4 张同尺寸帧。**归属闭合。**
+
+产生原因是本轮为验证修复有效性做过负对照（临时复制脚本、摘掉
+`watchCapturedJobs`），以及几次中途调试 —— 那些运行**用的是未接 watcher 的副本**，
+所以不登记、不清理。当时只手工清掉了一部分，剩下的记在了「85」这个
+已经被污染的数字里，**于是「泄漏」被当成了「基线」**。
+
+> 这是本轮最值得记的一条：**基线一旦被污染，后续所有「85 → 85」的证据都失效**，
+> 因为对照组和实验组共享同一个错误起点。§14.6 之所以能发现修复无效，
+> 是因为当时数字还干净。
+
+#### 清理走软删除，不物理删
+
+与 §12.10 同一条纪律 —— 删除用户数据目录一律走项目自己的软删除通道：
+
+```
+POST /api/gallery/batch-delete  permanent=false
+{"deleted":[8],"missing":[],"failed":[],"deleted_count":8,
+ "permanent":false,"purge_after_days":7}
+```
+
+终态核验：
+
+```
+job_dirs=79   api_total=79   trash_dirs=8（全部 7 天内可恢复）
+```
+
+回到 §13.18 记录的 79 基线，且回收站里 8 条齐全可还原 —— 万一判断有误，
+7 天内一条命令就能恢复。
+
+#### 还发现一个环境噪声源
+
+追查期间撞见一个 `verify-mask-gallery.mjs` 进程（PID 42852），
+启动时间是 **2026/10/6 18:10**，即前一天的残留。它不影响结论（计数证据
+都在同一条命令内自包含完成），但说明**机器上可能同时有别人/别轮的进程在造数**。
+
+这正是 §13.16「来源不明的残留不能自动删」的现实场景：一个并发进程造的 job，
+在另一个脚本眼里就是「随机 hex、无法证明归属」。harness 默认 `report` 档
+在这种环境下是唯一正确的选择。
+
+> 判据：`outputs/` 是**共享可写状态**。任何跨命令、跨进程的计数都可能失真，
+> 只有「同一条命令内跑前→跑后」才是证据。
