@@ -512,6 +512,10 @@ def gallery(q: str = "", tag: str = "", limit: int = 0, offset: int = 0):
     不在 album 但存在于磁盘的条目以缺省元数据呈现。
     不在磁盘但存在于 album 的条目是孤儿, 直接丢弃(保留在文件里供手工恢复)。
 
+    **零文件的空目录同样不进 items**(见第一段注释)。它既不参与 total,
+    也不参与 tags 统计 —— 契约是「items / total / tags 三者基于同一集合」,
+    让空目录只影响其中之一会让前端分页与筛选条的计数对不上。
+
     筛选放在**服务端**而不是前端: 前端过滤只能隐藏已经传过来的条目,
     /api/gallery 仍会把全部 URL 发过去。放后端才能让 ?q=xx 成为一个可复现、
     可分享、刷新后保持的链接。
@@ -562,6 +566,42 @@ def gallery(q: str = "", tag: str = "", limit: int = 0, offset: int = 0):
             # 用 stat 的 mode 判定而不是再调一次 is_dir(): 后者是第二次
             # syscall, 而这里已经拿到 st 了。
             continue
+        # 跳过空目录。
+        #
+        # 空目录真实存在, 但来源已经变了:
+        #
+        # 历史上 capture_save 在写任何文件**之前**就 mkdir, 所以
+        # 「mkdir 成功但后续 _check_image 抛 400/413」会留下零文件目录。
+        # 那条路已经堵死(见 routes/capture.py 的惰性建目录 + 回滚), 但
+        # **这里不能跟着删**: 用户会自己往 outputs/ 里放东西, 同步盘/
+        # 解压工具也会留残余目录, 而判空是最后一道兜底 —— 删掉它等于把
+        # 「用户的目录不出现在画廊里」和「空目录不会渲染成碎图卡片」这两条
+        # 契约一起放弃, 换成「我们的代码不该犯错」这种无法验证的假设。
+        # 便宜的检查, 兜住所有来源, 没有理由去掉。
+        #
+        # 另一个仍然存在的来源: 一次多张上传中途失败, 若回滚本身
+        # 失败(文件被占用/权限), 残缺目录同样会被这里挡掉。
+        #
+        # 刻意放在**筛选之前**: 判空只需要知道「有没有任何条目」, 与 title/
+        # note/tags 无关, 提前做能让「空」成为一条与筛选正交的排除规则 ——
+        # 否则空目录会先占掉一个 rows 名额, 再被 _matches 筛掉, 两者混在
+        # 一起时, 「某页为空」到底是没数据还是被筛光就分不清了。
+        #
+        # 代价是每个通过 stat 的目录多一次 opendir —— 与上面「不碰目录内容」
+        # 的优化看似冲突, 但这个交换是必要的, 不是退化:
+        #   1. 跳过必须在**切片之前**做。若推迟到第二段(只查当页), total 会
+        #      把空目录算进去, 而 items 少于 total —— verify-gallery-paging
+        #      断言 items.length === total, 前端也会因此翻出空洞页。
+        #   2. next(iterdir(), None) 命中首个条目即停, 不是完整遍历,
+        #      对非空目录只是一次 opendir。
+        # 排序/分页因此始终建立在「用户真正看得见的条目」上。
+        try:
+            if next(entry.iterdir(), None) is None:
+                continue
+        except OSError:
+            # 目录在 stat 之后、iterdir 之前被删掉(另一个标签页正在清理)。
+            # 与上面的 stat 分支同一个理由: 跳过, 不让整个列表 500。
+            continue
         meta = album.get(name) or {}
         merged = _merge_entry(_normalize_entry({}), meta)
         # 筛选只需要 job_id/title/note/tags, 全在 merged 里 ——
@@ -605,8 +645,13 @@ def gallery(q: str = "", tag: str = "", limit: int = 0, offset: int = 0):
             "job_id": name,
             "mtime": mtime,
             "thumbs": _pick_thumb(name, entry),
-            # 全量产物供大图查看灯箱; 空目录(理论上不该出现, 目录存在必有文件)
-            # 退化成空列表而不是 null, 前端少一处判空。
+            # 全量产物供大图查看灯箱。
+            #
+            # 仍是空列表而不是 null, 前端少一处判空。
+            # 走到这里的目录第一段已确认非空, 所以正常必有产物; 但两次
+            # 调用之间目录可能被清空(用户手动删/另一个标签页在删),
+            # _pick_media 仍可能返回空 —— 退化而不是抛错, 与第一段
+            # 对「中途消失」的处理保持同一个态度。
             "media": _pick_media(name, entry),
             **merged,
         })
